@@ -118,6 +118,11 @@ rather than crash.
 
 Result on the build named above: **22 checks, 0 failed.**
 
+The two "no plugin" arms need nothing else to resolve a `.odt` dump-reader, so if
+you already have this plugin installed at discovery path 2 or 3 the harness
+reports them as `SKIP` with the path that shadowed them, rather than failing —
+a false failure here would accuse the binary of a defect it does not have.
+
 ## Two upstream observations made while building this
 
 Both are measurements on officecli 1.0.158 (`5e3e2627`), reported here because

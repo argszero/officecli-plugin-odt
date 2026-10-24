@@ -109,42 +109,62 @@ def main():
     check("sibling reused on second open", "generated" not in err,
           "stderr: " + err.strip()[:160])
 
-    # -- arm 5 (negative): no plugin installed -------------------------------
-    bare = dict(ENV)
-    bare.pop("OFFICECLI_PLUGIN_DUMP_READER_ODT", None)
+    # -- precondition for the two "no plugin" arms ---------------------------
+    # These arms can only be faked if nothing else resolves a .odt dump-reader.
+    # A real user may legitimately have the plugin installed at discovery path 2
+    # or 3, in which case `main` falls through to it and the arms would report a
+    # false failure. Detect that and say so instead of inventing a defect.
+    stray = []
+    rc, out, err = run(["plugins", "list", "--json"])
+    try:
+        for item in json.loads(out).get("data", []):
+            if "dump-reader" in item.get("kinds", []) and ".odt" in item.get("extensions", []):
+                stray.append(item.get("path", "?"))
+    except (ValueError, AttributeError):
+        pass
+
     lonely = os.path.join(work, "lonely")
     os.makedirs(lonely, exist_ok=True)
     shutil.copy(src, os.path.join(lonely, "report.odt"))
-    os.remove(os.path.join(lonely, "report.docx")) if os.path.exists(
-        os.path.join(lonely, "report.docx")) else None
-    rc, out, err = run(["get", os.path.join(lonely, "report.odt"), "/body"], env=bare)
-    msg = (out + err)
-    check("missing plugin: non-zero exit", rc != 0, "rc=%d" % rc)
-    check("missing plugin: clear error, not a crash",
-          ("plugin" in msg.lower()) and ("Unhandled exception" not in msg),
-          " | ".join(msg.strip().splitlines()[:2]))
 
-    # -- arm 6 (negative): manifest protocol != 1 ----------------------------
-    bad = os.path.join(work, "badproto")
-    os.makedirs(bad, exist_ok=True)
-    bad_plugin = os.path.join(bad, "plugin")
-    with open(bad_plugin, "w") as fh:
-        fh.write('#!/usr/bin/env python3\nimport json,sys\n'
-                 'print(json.dumps({"name":"officecli-odt-badproto","version":"0.0.1",'
-                 '"protocol":2,"kinds":["dump-reader"],"extensions":[".odt"],'
-                 '"target":"docx","runtime":"python",'
-                 '"idle_timeout_seconds":{"default":30}}))\n')
-    os.chmod(bad_plugin, 0o755)
-    badenv = dict(ENV)
-    badenv["OFFICECLI_PLUGIN_DUMP_READER_ODT"] = bad_plugin
-    rc, out, err = run(["get", os.path.join(lonely, "report.odt"), "/body"], env=badenv)
-    msg = out + err
-    check("protocol mismatch: refused (non-zero exit)", rc != 0, "rc=%d" % rc)
-    check("protocol mismatch: rejection is explained",
-          "protocol" in msg.lower(), " | ".join(msg.strip().splitlines()[:2]))
-    # plugin-protocol.md §4.1 specifies exit code 5 for this case; record what
-    # the binary actually returns so the README can state the measured value.
-    print("NOTE  protocol-mismatch exit code measured: %d (protocol §4.1 says 5)" % rc)
+    if stray:
+        print("SKIP  negative arms: a .odt dump-reader is already installed at %s\n"
+              "      remove it (e.g. <officecli-dir>/plugins/dump-reader/odt or "
+              "~/.officecli/plugins/dump-reader/odt) and re-run to exercise them"
+              % ", ".join(stray))
+    else:
+        # -- arm 5 (negative): no plugin installed ---------------------------
+        bare = dict(ENV)
+        bare.pop("OFFICECLI_PLUGIN_DUMP_READER_ODT", None)
+        rc, out, err = run(["get", os.path.join(lonely, "report.odt"), "/body"], env=bare)
+        msg = (out + err)
+        check("missing plugin: non-zero exit", rc != 0, "rc=%d" % rc)
+        check("missing plugin: clear error, not a crash",
+              ("plugin" in msg.lower()) and ("Unhandled exception" not in msg),
+              " | ".join(msg.strip().splitlines()[:2]))
+
+        # -- arm 6 (negative): manifest protocol != 1 ------------------------
+        bad = os.path.join(work, "badproto")
+        os.makedirs(bad, exist_ok=True)
+        bad_plugin = os.path.join(bad, "plugin")
+        with open(bad_plugin, "w") as fh:
+            fh.write('#!/usr/bin/env python3\nimport json,sys\n'
+                     'print(json.dumps({"name":"officecli-odt-badproto","version":"0.0.1",'
+                     '"protocol":2,"kinds":["dump-reader"],"extensions":[".odt"],'
+                     '"target":"docx","runtime":"python",'
+                     '"idle_timeout_seconds":{"default":30}}))\n')
+        os.chmod(bad_plugin, 0o755)
+        badenv = dict(ENV)
+        badenv["OFFICECLI_PLUGIN_DUMP_READER_ODT"] = bad_plugin
+        rc, out, err = run(["get", os.path.join(lonely, "report.odt"), "/body"], env=badenv)
+        msg = out + err
+        check("protocol mismatch: refused (non-zero exit)", rc != 0, "rc=%d" % rc)
+        check("protocol mismatch: rejection is explained",
+              "protocol" in msg.lower(), " | ".join(msg.strip().splitlines()[:2]))
+        # plugin-protocol.md §4.1 specifies exit code 5 for this case; record
+        # what the binary actually returns so the README states the measured
+        # value rather than the documented one.
+        print("NOTE  protocol-mismatch exit code measured: %d (protocol §4.1 says 5)" % rc)
 
     # -- arm 7 (negative): corrupt input -------------------------------------
     junk = os.path.join(work, "junk.odt")
