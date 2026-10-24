@@ -16,6 +16,7 @@ import shutil
 import subprocess
 import sys
 import tempfile
+import zipfile
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 ROOT = os.path.dirname(HERE)
@@ -104,7 +105,96 @@ def main():
     rc, out, err = run(["get", sibling, "/body/tbl[1]/tr[2]/tc[1]"])
     check("table cell text", '"EMEA"' in out, out.strip()[:120])
 
-    # -- arm 4: sibling reuse (no reconversion) ------------------------------
+    # -- arm 4: images -------------------------------------------------------
+    # The source declares five translatable images (three PNGs, one SVG, and a
+    # second reference to one of the PNGs) plus two the reader must refuse: an
+    # EMF it cannot sniff, and one inside a table cell.
+    with zipfile.ZipFile(src) as z:
+        source_pics = {n: z.read(n) for n in z.namelist() if n.startswith("Pictures/")}
+    with zipfile.ZipFile(sibling) as z:
+        media = {n: z.read(n) for n in z.namelist()
+                 if re.match(r"^(word/)?media/", n)}
+
+    # 5 pictures, embedded as 6 parts: the SVG also carries the 1x1 PNG
+    # fallback officecli generates when `fallback` is not given.
+    check("image parts landed in the .docx", len(media) == 6,
+          "%d part(s): %s" % (len(media), ", ".join(sorted(media))))
+    check("the svg is embedded as svg",
+          any(n.endswith(".svg") for n in media), ", ".join(sorted(media)))
+    lost = [n for n, blob in source_pics.items()
+            if n.endswith(".png") and blob not in media.values()]
+    check("every source PNG appears byte-for-byte in the .docx", not lost,
+          "missing: %s" % ", ".join(lost))
+
+    rc, out, err = run(["get", sibling, "/body", "--depth", "1"])
+    n_paras = len([l for l in out.splitlines() if re.match(r"^/body/p\[", l)])
+    pics = []
+    for i in range(1, n_paras + 1):
+        rc, pout, perr = run(["get", sibling, "/body/p[%d]" % i, "--depth", "1"])
+        for line in pout.splitlines():
+            if "(picture)" in line:
+                pics.append((i, line))
+    check("five pictures read back", len(pics) == 5,
+          "%d found in paragraph(s) %s" % (len(pics), [i for i, _ in pics]))
+
+    # the paragraph that mixes text and an image: order must survive
+    rc, out, err = run(["get", sibling, "/body/p[5]", "--depth", "1"])
+    lines = out.splitlines()
+    ordered = (len(lines) >= 4 and "(run)" in lines[1] and "(picture)" in lines[2]
+               and "(run)" in lines[3])
+    check("text, image, text keep their order", ordered, out.strip()[:200])
+    check("surrounding text survives around the image",
+          "Text before" in lines[0] and "text after" in lines[0],
+          lines[0][:160] if lines else "")
+    check("frame geometry is honoured",
+          "width=2.0cm" in lines[2] and "height=1.5cm" in lines[2],
+          lines[2][:200] if len(lines) > 2 else "")
+    check("svg:title becomes the alt text", "alt=Red square" in lines[2],
+          lines[2][:200] if len(lines) > 2 else "")
+
+    # no frame geometry at all → pixel dimensions at 96dpi (96x48 → 2.54x1.27cm;
+    # officecli prints lengths rounded to 0.1cm)
+    blue = [l for _, l in pics if "blue.png" in l]
+    check("size falls back to the pixel dimensions when the frame has none",
+          any("width=2.5cm" in l and "height=1.3cm" in l for l in blue),
+          " | ".join(blue)[:220])
+    rels = [re.search(r"relId=(\S+)", l).group(1) for l in blue
+            if re.search(r"relId=(\S+)", l)]
+    check("two references to one source image get their own part",
+          len(rels) == 2 and len(set(rels)) == 2, ", ".join(rels))
+
+    # -- arm 5: the plugin's own output, checked directly --------------------
+    # Main collects a dump-reader's stderr but only surfaces it when the plugin
+    # *fails* (DumpReaderInvoker passes no OnStderrLine), so the skip report is
+    # only observable by running the plugin itself. Same for the JSONL contract.
+    p = subprocess.run([sys.executable, PLUGIN, "dump", src],
+                       capture_output=True, text=True, env=ENV)
+    check("direct dump exits 0", p.returncode == 0, p.stderr.strip()[:200])
+    bad = []
+    for n, line in enumerate(p.stdout.splitlines(), 1):
+        if not line.strip():
+            continue
+        try:
+            obj = json.loads(line)
+        except ValueError:
+            bad.append(n)
+            continue
+        if "command" not in obj:
+            bad.append(n)
+    check("every emitted line is a JSON command object", not bad,
+          "line(s): %s" % bad[:5])
+    check("a refused image format is reported, not dropped in silence",
+          "vector.emf" in p.stderr and "not png/jpeg/gif/bmp/tiff/svg" in p.stderr,
+          (p.stderr.strip().splitlines() or [""])[0][:200])
+    check("an image inside a table cell is reported",
+          "inside a table cell" in p.stderr, (p.stderr.strip().splitlines() or [""])[0][:200])
+    check("the end-of-run summary counts images",
+          "and 5 image(s)" in p.stderr, (p.stderr.strip().splitlines() or [""])[-1][:200])
+    rc, out, err = run(["get", sibling, "/body/tbl[1]/tr[2]/tc[2]"])
+    check("the cell keeps its text next to a dropped image", '"1200"' in out,
+          out.strip()[:120])
+
+    # -- arm 6: sibling reuse (no reconversion) ------------------------------
     rc, out, err = run(["get", src, "/body", "--depth", "1"], env=env)
     check("sibling reused on second open", "generated" not in err,
           "stderr: " + err.strip()[:160])
@@ -133,7 +223,7 @@ def main():
               "~/.officecli/plugins/dump-reader/odt) and re-run to exercise them"
               % ", ".join(stray))
     else:
-        # -- arm 5 (negative): no plugin installed ---------------------------
+        # -- arm 7 (negative): no plugin installed ---------------------------
         bare = dict(ENV)
         bare.pop("OFFICECLI_PLUGIN_DUMP_READER_ODT", None)
         rc, out, err = run(["get", os.path.join(lonely, "report.odt"), "/body"], env=bare)
@@ -143,7 +233,7 @@ def main():
               ("plugin" in msg.lower()) and ("Unhandled exception" not in msg),
               " | ".join(msg.strip().splitlines()[:2]))
 
-        # -- arm 6 (negative): manifest protocol != 1 ------------------------
+        # -- arm 8 (negative): manifest protocol != 1 ------------------------
         bad = os.path.join(work, "badproto")
         os.makedirs(bad, exist_ok=True)
         bad_plugin = os.path.join(bad, "plugin")
@@ -166,7 +256,7 @@ def main():
         # value rather than the documented one.
         print("NOTE  protocol-mismatch exit code measured: %d (protocol §4.1 says 5)" % rc)
 
-    # -- arm 7 (negative): corrupt input -------------------------------------
+    # -- arm 9 (negative): corrupt input -------------------------------------
     junk = os.path.join(work, "junk.odt")
     with open(junk, "w") as fh:
         fh.write("this is not a zip file")

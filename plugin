@@ -9,13 +9,20 @@ plugins/plugin-protocol.md v1 §5.1. Main replays them into a sibling .docx.
 
 Anything this reader cannot translate is reported on stderr as a
 `[warning] odt:` line and counted in the final summary — never dropped in
-silence. The supported construct list is what the manifest `supports`
-field declares, and it is what the tests measure.
+silence. (Note that main discards a dump-reader's stderr on a successful
+conversion, so that report is visible when the plugin is run directly.)
+Embedded images (PNG/JPEG/GIF/BMP/TIFF/SVG) are carried in the emitted command
+as data URIs, because main replays the output after this process exits and
+never passes --media-dir. The supported construct list is what the manifest
+`supports` field declares, and it is what the tests measure.
 """
 
+import base64
 import json
 import os
+import re
 import sys
+import urllib.parse
 import zipfile
 import xml.etree.ElementTree as ET
 
@@ -26,7 +33,13 @@ NS = {
     "style": "urn:oasis:names:tc:opendocument:xmlns:style:1.0",
     "fo": "urn:oasis:names:tc:opendocument:xmlns:xsl-fo-compatible:1.0",
     "draw": "urn:oasis:names:tc:opendocument:xmlns:drawing:1.0",
+    "svg": "urn:oasis:names:tc:opendocument:xmlns:svg-compatible:1.0",
+    "xlink": "http://www.w3.org/1999/xlink",
 }
+
+# ODF length units → points. 1pt = 1/72in; px is the CSS pixel (96dpi).
+UNITS_PT = {"cm": 72.0 / 2.54, "mm": 7.2 / 2.54, "in": 72.0,
+            "pt": 1.0, "pc": 12.0, "px": 0.75}
 
 # fo:text-align → officecli align value. Only values officecli accepts are
 # emitted; anything else is dropped and reported.
@@ -47,7 +60,7 @@ MAX_REPEAT = 64          # guard against a table:number-columns-repeated bomb
 LIST_KINDS = {}
 MANIFEST = {
     "name": "officecli-odt",
-    "version": "0.1.0",
+    "version": "0.2.0",
     "protocol": 1,
     "kinds": ["dump-reader"],
     "extensions": [".odt"],
@@ -64,6 +77,7 @@ MANIFEST = {
         "alignment",
         "lists:bullet,ordered",
         "tables:simple",
+        "images:png,jpeg,gif,bmp,tiff,svg (inline; sized from the frame)",
     ],
     "limits": {"maxFileSizeMb": 100},
     "license": "MIT",
@@ -98,6 +112,100 @@ def q(ns, tag):
 def local(elem):
     t = elem.tag
     return t.split("}", 1)[-1] if "}" in t else t
+
+
+# ---------------------------------------------------------------------------
+# images: sniffing, geometry
+# ---------------------------------------------------------------------------
+#
+# The four magic-byte families below are exactly the ones officecli's own
+# ImageSource.TrySniffContentType recognises (PNG, JPEG, GIF, BMP, TIFF, and
+# the "<svg"/"<?xml" header for SVG). Anything else — EMF/WMF included — is
+# reported as skipped instead of being embedded under a guessed content type:
+# a data URI is trusted by main without a magic check, so a wrong MIME here
+# would produce a schema-valid document with a broken image in it.
+
+def sniff_image(data):
+    """(mime, extension) for a supported embedded image, else None."""
+    if len(data) >= 4:
+        if data[:4] == b"\x89PNG":
+            return ("image/png", "png")
+        if data[:3] == b"\xff\xd8\xff":
+            return ("image/jpeg", "jpg")
+        if data[:4] == b"GIF8":
+            return ("image/gif", "gif")
+        if data[:2] == b"BM":
+            return ("image/bmp", "bmp")
+        if data[:4] in (b"II*\x00", b"MM\x00*"):
+            return ("image/tiff", "tiff")
+    head = data[:512]
+    i = 3 if head[:3] == b"\xef\xbb\xbf" else 0
+    while i < len(head) and head[i:i + 1] in (b" ", b"\t", b"\r", b"\n"):
+        i += 1
+    low = head[i:].lower()
+    if low.startswith(b"<svg") or low.startswith(b"<?xml") or low.startswith(b"<!doctype svg"):
+        return ("image/svg+xml", "svg")
+    return None
+
+
+def pixel_dims(data):
+    """(width, height) in pixels, or None — mirrors ImageSource.TryGetDimensions."""
+    try:
+        if data[:4] == b"\x89PNG" and len(data) >= 24:
+            w = int.from_bytes(data[16:20], "big")
+            h = int.from_bytes(data[20:24], "big")
+            return (w, h) if w > 0 and h > 0 else None
+        if data[:4] == b"GIF8" and len(data) >= 10:
+            w = data[6] | (data[7] << 8)
+            h = data[8] | (data[9] << 8)
+            return (w, h) if w > 0 and h > 0 else None
+        if data[:2] == b"BM" and len(data) >= 26:
+            w = int.from_bytes(data[18:22], "little")
+            h = abs(int.from_bytes(data[22:26], "little", signed=True))
+            return (w, h) if w > 0 and h > 0 else None
+        if data[:3] == b"\xff\xd8\xff":
+            return _jpeg_dims(data)
+    except (IndexError, ValueError):
+        return None
+    return None
+
+
+def _jpeg_dims(data):
+    i, n = 2, len(data)
+    while i + 9 < n:
+        if data[i] != 0xFF:
+            return None
+        marker = data[i + 1]
+        if marker == 0xD8 or marker == 0x01 or 0xD0 <= marker <= 0xD7:
+            i += 2
+            continue
+        if marker == 0xDA:
+            return None
+        seg = int.from_bytes(data[i + 2:i + 4], "big")
+        is_sof = (0xC0 <= marker <= 0xCF) and marker not in (0xC4, 0xC8, 0xCC)
+        if is_sof:
+            h = int.from_bytes(data[i + 5:i + 7], "big")
+            w = int.from_bytes(data[i + 7:i + 9], "big")
+            return (w, h) if w > 0 and h > 0 else None
+        if seg < 2:
+            return None
+        i += 2 + seg
+    return None
+
+
+def length_pt(value):
+    """ODF length ('5.291cm', '2in', '150pt', '12') → points, or None."""
+    if not value:
+        return None
+    m = re.match(r"^\s*(-?[0-9]*\.?[0-9]+)\s*(cm|mm|in|pt|pc|px)?\s*$", value)
+    if not m:
+        return None
+    return float(m.group(1)) * UNITS_PT[m.group(2) or "px"]
+
+
+def fmt_pt(points):
+    """Points as an officecli length ('12pt'); officecli wants the unit."""
+    return ("%.2f" % points).rstrip("0").rstrip(".") + "pt"
 
 
 # ---------------------------------------------------------------------------
@@ -178,17 +286,91 @@ def style_props(styles, family, name):
     return styles.get((family, name), {})
 
 
+def image_items(images, width, height, zf, skipped, alt_hint=None):
+    """Turn draw:image elements into ('image', bytes, mime, w, h, alt) items.
+
+    The bytes are carried as a data URI by the emitter, so nothing has to
+    survive on disk between this process and main's replay of its output.
+    """
+    out = []
+    for img in images:
+        href = img.get(q("xlink", "href"))
+        if not href:
+            skipped.note("draw:image without xlink:href (linked, not embedded)")
+            continue
+        if href.startswith("data:") or "://" in href:
+            skipped.note("draw:image with an external href (not a package part)")
+            continue
+        part = urllib.parse.unquote(href)
+        try:
+            data = zf.read(part)
+        except KeyError:
+            skipped.note("image part '%s' missing from the package" % part)
+            continue
+        sniffed = sniff_image(data)
+        if sniffed is None:
+            skipped.note("image '%s' is not png/jpeg/gif/bmp/tiff/svg"
+                         % part.rsplit("/", 1)[-1])
+            continue
+        mime, _ext = sniffed
+
+        w, h = width, height
+        dims = pixel_dims(data)
+        if dims:
+            ratio = float(dims[1]) / float(dims[0])
+            if w is None and h is None:
+                w, h = dims[0] * 0.75, dims[1] * 0.75   # CSS pixel = 1/96in
+            elif w is None:
+                w = h / ratio
+            elif h is None:
+                h = w * ratio
+        elif w is None or h is None:
+            skipped.note("image '%s' size unknown (no frame geometry, unreadable header)"
+                         % part.rsplit("/", 1)[-1])
+
+        alt = alt_hint or part.rsplit("/", 1)[-1]
+        out.append(("image", data, mime, w, h, alt))
+    return out
+
+
+def frame_items(frame, zf, skipped):
+    """Items for one draw:frame: its image(s), plus honest notes for the rest."""
+    width = length_pt(frame.get(q("svg", "width")))
+    height = length_pt(frame.get(q("svg", "height")))
+    anchor = frame.get(q("text", "anchor-type"))
+    if anchor and anchor != "as-char":
+        skipped.note("image anchored '%s' (placed inline instead)" % anchor)
+
+    alt_hint = None
+    for tag in ("title", "desc"):
+        el = frame.find(q("svg", tag))
+        if el is not None and (el.text or "").strip():
+            alt_hint = el.text.strip()
+            break
+
+    for kid in frame.iter():
+        if local(kid) == "text-box":
+            skipped.note("text box (draw:text-box): its text is dropped")
+
+    images = [el for el in frame.iter() if local(el) == "image"]
+    return image_items(images, width, height, zf, skipped, alt_hint)
+
+
 # ---------------------------------------------------------------------------
 # inline runs
 # ---------------------------------------------------------------------------
 
-def inline_runs(elem, styles, inherited, skipped):
-    """Walk a paragraph-like element and return [(text, props)] in order."""
+def inline_items(elem, styles, inherited, skipped, zf):
+    """Walk a paragraph-like element and return its inline items in order.
+
+    Each item is ("text", text, props) or ("image", bytes, mime, w, h, alt).
+    Order is document order, so "before <image> after" keeps its sequence.
+    """
     out = []
 
     def walk(node, props):
         if node.text:
-            out.append((node.text, props))
+            out.append(("text", node.text, props))
         for child in node:
             ln = local(child)
             if ln == "s":
@@ -197,17 +379,25 @@ def inline_runs(elem, styles, inherited, skipped):
                     n = int(n) if n is not None else 1
                 except ValueError:
                     n = 1
-                out.append((" " * max(1, min(n, 1024)), props))
+                out.append(("text", " " * max(1, min(n, 1024)), props))
             elif ln == "tab":
-                out.append((" ", props))
+                out.append(("text", " ", props))
                 skipped.note("text:tab (flattened to a space)")
             elif ln == "line-break":
-                out.append((" ", props))
+                out.append(("text", " ", props))
                 skipped.note("text:line-break (flattened to a space)")
             elif ln == "span":
                 sp = dict(props)
                 sp.update(style_props(styles, "text", child.get(q("text", "style-name"))))
                 walk(child, sp)
+            elif ln == "frame":
+                out.extend(frame_items(child, zf, skipped))
+            elif ln == "image":
+                out.extend(image_items([child], None, None, zf, skipped))
+            elif ln == "g":
+                # a group of frames: descend, the individual frames are handled
+                skipped.note("draw:g group (frames flattened in document order)")
+                walk(child, props)
             else:
                 if ln == "a":
                     skipped.note("text:a hyperlink (text kept, link dropped)")
@@ -219,16 +409,26 @@ def inline_runs(elem, styles, inherited, skipped):
                             "reference-mark", "reference-mark-start", "reference-mark-end",
                             "soft-page-break", "ruby"):
                     skipped.note("text:%s (dropped)" % ln)
+                elif ln in ("custom-shape", "rect", "circle", "ellipse", "line",
+                            "polygon", "polyline", "path", "connector", "caption",
+                            "chart", "object", "object-ole", "plugin", "applet",
+                            "floating-frame", "handle"):
+                    # A drawing, not a picture: there is no raster to embed.
+                    skipped.note("draw:%s (vector shape or embedded object, dropped)" % ln)
                 # descend so nested text is not lost
                 walk(child, props)
             # The tail belongs to the parent's run of text, never to the child:
             # appending it once per child is what keeps "a <span>b</span> c"
             # from collapsing into "abc".
             if child.tail:
-                out.append((child.tail, props))
+                out.append(("text", child.tail, props))
 
     walk(elem, inherited)
-    return [(t, p) for t, p in out if t]
+    return [it for it in out if it[0] == "image" or it[1]]
+
+
+def text_of_items(items):
+    return "".join(it[1] for it in items if it[0] == "text")
 
 
 # ---------------------------------------------------------------------------
@@ -239,18 +439,17 @@ class Emitter:
     def __init__(self):
         self.p = 0      # /body/p[N] counter
         self.tbl = 0    # /body/tbl[N] counter
+        self.pic = 0    # pictures emitted, for the end-of-run summary
 
     def emit(self, obj):
         sys.stdout.write(json.dumps(obj, ensure_ascii=False) + "\n")
         sys.stdout.flush()
 
-    def paragraph(self, text, para_props, runs=None):
+    def paragraph(self, items, para_props):
         self.p += 1
         path = "/body/p[%d]" % self.p
         props = {k: v for k, v in para_props.items() if v}
-        if runs is None:
-            if text:
-                props["text"] = text
+        if not items:
             self.emit({"command": "add", "parent": "/body", "type": "paragraph",
                        "props": props})
             return
@@ -259,12 +458,31 @@ class Emitter:
         # duplicating every character.
         self.emit({"command": "add", "parent": "/body", "type": "paragraph",
                    "props": props})
-        for run_text, run_props in runs:
-            rp = {"text": run_text}
-            for key in ("bold", "italic", "underline"):
-                if run_props.get(key):
-                    rp[key] = "true"
-            self.emit({"command": "add", "parent": path, "type": "run", "props": rp})
+        for it in items:
+            if it[0] == "text":
+                rp = {"text": it[1]}
+                for key in ("bold", "italic", "underline"):
+                    if it[2].get(key):
+                        rp[key] = "true"
+                self.emit({"command": "add", "parent": path, "type": "run",
+                           "props": rp})
+                continue
+            _, data, mime, w_pt, h_pt, alt = it
+            # A data URI keeps the image self-contained: main replays this
+            # output *after* the plugin exits, and it never passes --media-dir
+            # (DumpReaderInvoker passes only "dump <source>"), so a scratch file
+            # would either be gone by replay time or leak forever.
+            pp = {"src": "data:%s;base64,%s"
+                        % (mime, base64.b64encode(data).decode("ascii"))}
+            if w_pt is not None:
+                pp["width"] = fmt_pt(w_pt)
+            if h_pt is not None:
+                pp["height"] = fmt_pt(h_pt)
+            if alt:
+                pp["alt"] = alt
+            self.pic += 1
+            self.emit({"command": "add", "parent": path, "type": "picture",
+                       "props": pp})
 
     def table(self, grid, skipped):
         self.tbl += 1
@@ -289,20 +507,40 @@ class Emitter:
 # document walk
 # ---------------------------------------------------------------------------
 
-def cell_text(cell, styles, skipped):
+def cell_text(cell, styles, skipped, zf):
     parts = []
     for kid in cell:
         if local(kid) == "p":
-            parts.append(text_of(kid, styles, skipped))
+            parts.append(text_of(kid, styles, skipped, zf))
         elif local(kid) == "table":
             skipped.note("nested table:table (cells flattened into the parent cell)")
     return "\n".join(p for p in parts if p)
 
 
-def text_of(elem, styles, skipped):
+def text_of(elem, styles, skipped, zf):
     base = style_props(styles, "paragraph", elem.get(q("text", "style-name")))
-    runs = inline_runs(elem, styles, base, skipped)
-    return "".join(t for t, _ in runs)
+    items = inline_items(elem, styles, base, skipped, zf)
+    for it in items:
+        if it[0] == "image":
+            skipped.note("image inside a table cell (a cell carries text only)")
+    return text_of_items(items)
+
+
+def block_image_items(elem, zf, skipped):
+    """Items for a drawing element sitting directly in office:text."""
+    ln = local(elem)
+    if ln == "frame":
+        return frame_items(elem, zf, skipped)
+    if ln == "image":
+        return image_items([elem], None, None, zf, skipped)
+    if ln == "g":
+        skipped.note("draw:g group (frames flattened in document order)")
+        out = []
+        for kid in elem:
+            out.extend(block_image_items(kid, zf, skipped))
+        return out
+    skipped.note("draw:%s at block level (dropped)" % ln)
+    return []
 
 
 def read_cell(row_cells, skipped):
@@ -330,7 +568,7 @@ def read_cell(row_cells, skipped):
     return out
 
 
-def walk_block(elem, em, styles, skipped, list_kind=None, level=0):
+def walk_block(elem, em, styles, skipped, zf, list_kind=None, level=0):
     """Emit one block-level element."""
     ln = local(elem)
 
@@ -342,18 +580,20 @@ def walk_block(elem, em, styles, skipped, list_kind=None, level=0):
             lvl = 1
         lvl = max(1, min(6, lvl))
         base = style_props(styles, "paragraph", elem.get(q("text", "style-name")))
-        runs = inline_runs(elem, styles, base, skipped)
-        text = "".join(t for t, _ in runs)
+        items = inline_items(elem, styles, base, skipped, zf)
         props = {"style": "Heading%d" % lvl}
         if base.get("align"):
             props["align"] = base["align"]
-        em.paragraph(text, props, runs or None)
+        em.paragraph(items, props)
         return
 
     if ln == "p":
         base = style_props(styles, "paragraph", elem.get(q("text", "style-name")))
-        runs = inline_runs(elem, styles, base, skipped)
-        text = "".join(t for t, _ in runs)
+        items = inline_items(elem, styles, base, skipped, zf)
+        if not items and elem.find(".//" + q("draw", "image")) is not None:
+            # Its only content was an image that was refused (already reported);
+            # emitting the paragraph would leave an empty one behind.
+            return
         props = {}
         if base.get("align"):
             props["align"] = base["align"]
@@ -361,7 +601,15 @@ def walk_block(elem, em, styles, skipped, list_kind=None, level=0):
             props["liststyle"] = list_kind
             if level:
                 props["level"] = str(level)
-        em.paragraph(text, props, runs or None)
+        em.paragraph(items, props)
+        return
+
+    if ln in ("frame", "image", "g"):
+        # A picture that is a direct child of office:text (exported by some
+        # writers instead of putting it inside a paragraph).
+        items = block_image_items(elem, zf, skipped)
+        if items:
+            em.paragraph(items, {})
         return
 
     if ln == "list":
@@ -377,7 +625,7 @@ def walk_block(elem, em, styles, skipped, list_kind=None, level=0):
             if local(item) != "list-item":
                 continue
             for kid in item:
-                walk_block(kid, em, styles, skipped,
+                walk_block(kid, em, styles, skipped, zf,
                            list_kind=kind, level=level)
         return
 
@@ -388,7 +636,7 @@ def walk_block(elem, em, styles, skipped, list_kind=None, level=0):
                 continue
             cells = read_cell([c for c in row if local(c) in ("table-cell", "covered-table-cell")],
                               skipped)
-            grid.append([cell_text(c, styles, skipped) if not isinstance(c, str) else c
+            grid.append([cell_text(c, styles, skipped, zf) if not isinstance(c, str) else c
                          for c in cells])
         em.table(grid, skipped)
         return
@@ -398,7 +646,7 @@ def walk_block(elem, em, styles, skipped, list_kind=None, level=0):
 
     if ln == "section":
         for kid in elem:
-            walk_block(kid, em, styles, skipped)
+            walk_block(kid, em, styles, skipped, zf)
         return
 
     skipped.note("text:%s at block level (dropped)" % ln)
@@ -419,31 +667,34 @@ def convert(path):
             sys.stderr.write("package has no content.xml — not an OpenDocument text file\n")
             return 2
 
-    try:
-        root = ET.fromstring(content)
-    except ET.ParseError as exc:
-        sys.stderr.write("content.xml is not well-formed XML: %s\n" % exc)
-        return 2
+        try:
+            root = ET.fromstring(content)
+        except ET.ParseError as exc:
+            sys.stderr.write("content.xml is not well-formed XML: %s\n" % exc)
+            return 2
 
-    styles, _raw = collect_styles(root)
+        styles, _raw = collect_styles(root)
 
-    body = root.find(q("office", "body"))
-    if body is None:
-        sys.stderr.write("content.xml has no office:body\n")
-        return 2
-    text_el = body.find(q("office", "text"))
-    if text_el is None:
-        # e.g. a spreadsheet or presentation packaged as .odt
-        sys.stderr.write("package is not an OpenDocument text document "
-                         "(no office:text body)\n")
-        return 3
+        body = root.find(q("office", "body"))
+        if body is None:
+            sys.stderr.write("content.xml has no office:body\n")
+            return 2
+        text_el = body.find(q("office", "text"))
+        if text_el is None:
+            # e.g. a spreadsheet or presentation packaged as .odt
+            sys.stderr.write("package is not an OpenDocument text document "
+                             "(no office:text body)\n")
+            return 3
 
-    em = Emitter()
-    for kid in text_el:
-        walk_block(kid, em, styles, skipped)
+        # The package stays open for the walk: image bytes are read straight out
+        # of it and carried in the emitted commands.
+        em = Emitter()
+        for kid in text_el:
+            walk_block(kid, em, styles, skipped, zf)
 
     skipped.report()
-    warn("emitted %d paragraph(s) and %d table(s)" % (em.p, em.tbl))
+    warn("emitted %d paragraph(s), %d table(s) and %d image(s)"
+         % (em.p, em.tbl, em.pic))
     if em.p == 0 and em.tbl == 0:
         warn("the source produced no translatable blocks")
     return 0
