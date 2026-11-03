@@ -31,9 +31,15 @@ discovery paths in protocol §3 — the first match wins:
 | # | Path | Measured on this machine |
 |---|---|---|
 | 1 | `$OFFICECLI_PLUGIN_DUMP_READER_ODT` (absolute path to the file) | ✅ works, **not listed** by `officecli plugins list` |
-| 2 | `~/.officecli/plugins/dump-reader/odt/plugin` | not tested (the test sandbox could not write there); same code path as #3 |
+| 2 | `~/.officecli/plugins/dump-reader/odt/plugin` | ✅ works and **is listed**; the release-asset install path (measured with `HOME` redirected into a scratch dir) |
 | 3 | `<dir of the officecli binary>/plugins/dump-reader/odt/plugin` | ✅ works, listed by `officecli plugins list` |
 | 4 | an executable `officecli-dump-reader-odt` or `officecli-odt` on `PATH` | not tested |
+
+**Measured (0.3.0):** path 2 works end to end — a clean
+`HOME=<dir>` with `plugin` at `~/.officecli/plugins/dump-reader/odt/plugin` is
+listed by `officecli plugins list` (name `officecli-odt`, version `0.3.0`) and a
+`.odt` converts through it with no environment variable set, producing a
+sibling `.docx` that validates. That is the path the release notes use.
 
 So the simplest machine-local install is:
 
