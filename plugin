@@ -60,7 +60,7 @@ MAX_REPEAT = 64          # guard against a table:number-columns-repeated bomb
 LIST_KINDS = {}
 MANIFEST = {
     "name": "officecli-odt",
-    "version": "0.2.0",
+    "version": "0.3.0",
     "protocol": 1,
     "kinds": ["dump-reader"],
     "extensions": [".odt"],
@@ -72,11 +72,12 @@ MANIFEST = {
     "supports": [
         "paragraphs",
         "runs",
-        "inline-formatting:bold,italic,underline",
+        "inline-formatting:bold,italic,underline,strikethrough,super/subscript",
         "heading-levels:1-6",
         "alignment",
         "lists:bullet,ordered",
-        "tables:simple",
+        "tables:simple,merged-cells (colspan/rowspan)",
+        "hyperlinks:external-url,mailto",
         "images:png,jpeg,gif,bmp,tiff,svg (inline; sized from the frame)",
     ],
     "limits": {"maxFileSizeMb": 100},
@@ -246,6 +247,17 @@ def collect_styles(root):
             underline = tp.get(q("style", "text-underline-style"))
             if underline and underline != "none":
                 props["underline"] = "true"
+            # ODF spells these two as attributes on style:text-properties; both
+            # map onto a run property officecli already accepts (schemas/help/
+            # docx/run.json declares strike and vertAlign).
+            strike = (tp.get(q("style", "text-line-through-style")) or "").lower()
+            if strike and strike != "none":
+                props["strike"] = "true"
+            pos = (tp.get(q("style", "text-position")) or "").strip().lower()
+            if pos.startswith("super"):
+                props["vertAlign"] = "superscript"
+            elif pos.startswith("sub"):
+                props["vertAlign"] = "subscript"
         pp = st.find(q("style", "paragraph-properties"))
         if pp is not None:
             align = (pp.get(q("fo", "text-align")) or "").lower()
@@ -400,7 +412,39 @@ def inline_items(elem, styles, inherited, skipped, zf):
                 walk(child, props)
             else:
                 if ln == "a":
-                    skipped.note("text:a hyperlink (text kept, link dropped)")
+                    # A hyperlink is its own element in the docx vocabulary
+                    # (`add --type hyperlink` under the paragraph), not a run
+                    # property, so it is collected as an item rather than
+                    # flattened into the surrounding text.
+                    start = len(out)
+                    walk(child, props)
+                    inner = out[start:]
+                    text = text_of_items(inner)
+                    href = child.get(q("xlink", "href")) or ""
+                    if any(it[0] != "text" for it in inner):
+                        skipped.note("text:a wrapping non-text content "
+                                     "(link dropped, content kept)")
+                    elif not text:
+                        del out[start:]
+                    elif not href:
+                        skipped.note("text:a without xlink:href (text kept)")
+                    elif href.startswith("#"):
+                        # The target is a text:bookmark, which this reader does
+                        # not convert — emitting w:anchor would produce a link
+                        # that lands nowhere, so only the text is kept.
+                        skipped.note("text:a internal anchor '#%s' "
+                                     "(text kept; bookmark targets are not converted)"
+                                     % urllib.parse.unquote(href[1:]))
+                    elif "://" in href or href.startswith("mailto:"):
+                        out[start:] = [("link", href, text, {"kind": "url"})]
+                    else:
+                        # A relative target would need a relationship to a part
+                        # this conversion does not carry; keep the text.
+                        skipped.note("text:a with a relative href '%s' "
+                                     "(text kept, link dropped)" % href)
+                    if child.tail:
+                        out.append(("text", child.tail, props))
+                    continue
                 elif ln == "note":
                     skipped.note("text:note footnote/endnote (dropped)")
                 elif ln in ("change", "change-start", "change-end"):
@@ -424,7 +468,7 @@ def inline_items(elem, styles, inherited, skipped, zf):
                 out.append(("text", child.tail, props))
 
     walk(elem, inherited)
-    return [it for it in out if it[0] == "image" or it[1]]
+    return [it for it in out if it[0] in ("image", "link") or it[1]]
 
 
 def text_of_items(items):
@@ -440,6 +484,7 @@ class Emitter:
         self.p = 0      # /body/p[N] counter
         self.tbl = 0    # /body/tbl[N] counter
         self.pic = 0    # pictures emitted, for the end-of-run summary
+        self.link = 0   # hyperlinks emitted
 
     def emit(self, obj):
         sys.stdout.write(json.dumps(obj, ensure_ascii=False) + "\n")
@@ -461,11 +506,19 @@ class Emitter:
         for it in items:
             if it[0] == "text":
                 rp = {"text": it[1]}
-                for key in ("bold", "italic", "underline"):
+                for key in ("bold", "italic", "underline", "strike", "vertAlign"):
                     if it[2].get(key):
-                        rp[key] = "true"
+                        rp[key] = it[2][key] if key == "vertAlign" else "true"
                 self.emit({"command": "add", "parent": path, "type": "run",
                            "props": rp})
+                continue
+            if it[0] == "link":
+                _, target, text, meta = it
+                hp = {"text": text}
+                hp["anchor" if meta.get("kind") == "anchor" else "url"] = target
+                self.link += 1
+                self.emit({"command": "add", "parent": path, "type": "hyperlink",
+                           "props": hp})
                 continue
             _, data, mime, w_pt, h_pt, alt = it
             # A data URI keeps the image self-contained: main replays this
@@ -494,14 +547,34 @@ class Emitter:
         self.emit({"command": "add", "parent": "/body", "type": "table",
                    "props": {"rows": str(rows), "cols": str(cols)}})
         base = "/body/tbl[%d]" % self.tbl
-        for r, cells in enumerate(grid, start=1):
-            for c, text in enumerate(cells, start=1):
-                if not text:
+        # Vertical merges are emitted after every cell's text has landed: a
+        # `vmerge=continue` only marks a slot, and the restarting cell above it
+        # must already exist when that mark is written.
+        vmerges = []
+        for r, row in enumerate(grid, start=1):
+            tc = 0          # officecli's own tc index — NOT the ODF column
+            for cell in row:
+                if cell is None:
+                    # Covered by a colspan: that cell's gridSpan already spans
+                    # this slot, so no tc of its own is created for it.
                     continue
-                self.emit({"command": "set",
-                           "path": "%s/tr[%d]/tc[%d]" % (base, r, c),
-                           "props": {"text": text}})
-
+                tc += 1
+                path = "%s/tr[%d]/tc[%d]" % (base, r, tc)
+                props = {}
+                if cell["text"]:
+                    props["text"] = cell["text"]
+                if cell["colspan"] > 1:
+                    props["colspan"] = str(cell["colspan"])
+                if props:
+                    self.emit({"command": "set", "path": path, "props": props})
+                span = cell["rowspan"]
+                if span > 1:
+                    vmerges.append((path, "restart", span))
+                    for k in range(1, span):
+                        vmerges.append(("%s/tr[%d]/tc[%d]" % (base, r + k, tc),
+                                        "continue", 0))
+        for path, mode, _span in vmerges:
+            self.emit({"command": "set", "path": path, "props": {"vmerge": mode}})
 
 # ---------------------------------------------------------------------------
 # document walk
@@ -544,28 +617,42 @@ def block_image_items(elem, zf, skipped):
 
 
 def read_cell(row_cells, skipped):
-    """Flatten a row's cells, honouring table:number-columns-repeated."""
+    """Flatten a row's cells into (cell_element_or_None, span) pairs.
+
+    `table:number-columns-repeated` repeats a cell; `covered-table-cell` is the
+    slot a horizontal merge swallowed, so it becomes a placeholder the caller
+    skips rather than a cell of its own.
+    """
     out = []
     for cell in row_cells:
         ln = local(cell)
         if ln == "covered-table-cell":
-            rep = cell.get(q("table", "number-columns-repeated"))
-            try:
-                rep = int(rep) if rep else 1
-            except ValueError:
-                rep = 1
-            out.extend([""] * max(1, min(rep, MAX_REPEAT)))
+            rep = _repeat(cell)
+            out.extend([(None, 1)] * rep)
             continue
         if ln != "table-cell":
             continue
-        rep = cell.get(q("table", "number-columns-repeated"))
-        try:
-            rep = int(rep) if rep else 1
-        except ValueError:
-            rep = 1
-        rep = max(1, min(rep, MAX_REPEAT))
-        out.extend([cell] * rep)
+        rep = _repeat(cell)
+        out.extend([(cell, 1)] * rep)
     return out
+
+
+def _repeat(cell):
+    rep = cell.get(q("table", "number-columns-repeated"))
+    try:
+        rep = int(rep) if rep else 1
+    except ValueError:
+        rep = 1
+    return max(1, min(rep, MAX_REPEAT))
+
+
+def _span(cell, attr):
+    v = cell.get(q("table", attr))
+    try:
+        v = int(v) if v else 1
+    except ValueError:
+        v = 1
+    return max(1, min(v, MAX_REPEAT))
 
 
 def walk_block(elem, em, styles, skipped, zf, list_kind=None, level=0):
@@ -636,8 +723,19 @@ def walk_block(elem, em, styles, skipped, zf, list_kind=None, level=0):
                 continue
             cells = read_cell([c for c in row if local(c) in ("table-cell", "covered-table-cell")],
                               skipped)
-            grid.append([cell_text(c, styles, skipped, zf) if not isinstance(c, str) else c
-                         for c in cells])
+            out_row = []
+            for cell, _rep in cells:
+                if cell is None:
+                    # A covered slot: its column was already claimed by the
+                    # gridSpan of the cell to its left.
+                    out_row.append(None)
+                    continue
+                out_row.append({
+                    "text": cell_text(cell, styles, skipped, zf),
+                    "colspan": _span(cell, "number-columns-spanned"),
+                    "rowspan": _span(cell, "number-rows-spanned"),
+                })
+            grid.append(out_row)
         em.table(grid, skipped)
         return
 

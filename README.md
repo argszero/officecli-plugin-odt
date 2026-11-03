@@ -2,7 +2,8 @@
 
 A **dump-reader plugin** for [officecli](https://github.com/iOfficeAI/OfficeCLI) that
 converts OpenDocument Text (`.odt`, LibreOffice Writer) into `.docx` — text,
-runs, headings, alignment, lists, simple tables and **images**.
+runs, headings, alignment, lists, tables (including **merged cells**),
+**images** and **hyperlinks**.
 
 `officecli get report.odt /body` converts the file once, writes the sibling
 `report.docx`, and every later command works on that `.docx`. The plugin speaks
@@ -10,10 +11,11 @@ runs, headings, alignment, lists, simple tables and **images**.
 §2.1/§5.1: a one-shot process that streams officecli batch commands as JSONL on
 stdout, which main replays into a fresh native file.
 
-Verified against **officecli 1.0.158**, built from upstream `main` at
-[`5e3e2627`](https://github.com/iOfficeAI/OfficeCLI/commit/5e3e2627)
-(`dotnet build -c Release src/officecli/officecli.csproj`), on macOS arm64 with
-Python 3.13.
+**Version 0.3.0.** Verified against **officecli 1.0.160** (upstream `main` at
+[`c56512c8`](https://github.com/iOfficeAI/OfficeCLI/commit/c56512c8)) and against
+**1.0.158** ([`5e3e2627`](https://github.com/iOfficeAI/OfficeCLI/commit/5e3e2627))
+for the 0.2.0 behaviour, on macOS arm64 with Python 3.13. The suites need a
+binary; no other build tooling is involved.
 
 ## Requirements
 
@@ -76,11 +78,21 @@ Declared in the manifest `supports` field, and each item is asserted by
 `tests/verify.py`:
 
 - paragraphs
-- runs, with **bold / italic / underline**
+- runs, with **bold / italic / underline / strikethrough**, and
+  **superscript / subscript** (`style:text-line-through-style`,
+  `style:text-position` → `strike`, `vertAlign`)
 - heading levels **1–6** (`text:h @text:outline-level` → `style=Heading<N>`)
 - alignment (`fo:text-align` → `align=left|center|right|justify`)
 - **bullet** and **ordered** lists (`text:list-style` → `liststyle=bullet|ordered`)
-- simple tables (`table:table` → `add --type table`, text into each cell)
+- simple tables (`table:table` → `add --type table`, text into each cell), and
+  **merged cells** — `table:number-columns-spanned` → `colspan` (`w:gridSpan`)
+  and `table:number-rows-spanned` → `vmerge=restart` / `vmerge=continue`
+  (`w:vMerge`). A `table:covered-table-cell` is the slot a merge swallowed, so
+  it is consumed by its neighbour's span instead of becoming a cell of its own
+- **hyperlinks** — `text:a` with an absolute `xlink:href` → `add --type
+  hyperlink`, which gives a `w:hyperlink` element plus an external relationship
+  (`TargetMode="External"`) pointing at the URL. `mailto:` targets work the same
+  way
 - **images** — `draw:frame`/`draw:image` for **PNG, JPEG, GIF, BMP, TIFF and
   SVG**, placed inline where they sit in the text flow (see below)
 
@@ -143,10 +155,15 @@ python3 plugin dump report.odt > /dev/null   # stdout is the JSONL command strea
   of that cell survives)
 - image formats outside the six above — EMF and WMF in particular, which have no
   magic bytes this reader can trust
-- hyperlinks (`text:a` — the text is kept, the link target is lost)
 - footnotes and endnotes (`text:note`)
 - fields, cross-references, bookmarks, tracked changes (flattened to text)
-- nested tables; tables with merged cells lose the merge
+- nested tables
+- **internal anchors** — `text:a xlink:href="#name"` points at a
+  `text:bookmark`, and bookmarks are not converted, so the text is kept and the
+  link is dropped (with a warning). A `w:anchor` pointing at a bookmark that
+  does not exist would be a link that lands nowhere, so it is not emitted
+- `text:a` with a **relative** href, which would need a relationship to a part
+  this conversion does not carry
 - true sublists — a nested list item keeps its `level` tag, so it renders at the
   right depth, but it starts a new numbering instance rather than joining the
   parent list
@@ -159,26 +176,70 @@ with exit 3 rather than converted into a wrong-shaped document.
 
 ## Verify it yourself
 
+Two suites, both standard-library Python, both driven by `OFFICECLI_BIN`:
+
 ```bash
-OFFICECLI_BIN=/path/to/officecli python3 tests/verify.py
+OFFICECLI_BIN=/path/to/officecli python3 tests/verify.py   # 38 checks
+OFFICECLI_BIN=/path/to/officecli python3 tests/cells.py    # 4 cells, 51 assertions
 ```
 
-`tests/verify.py` builds a fixture `.odt` covering every supported construct
-(`tests/make_fixture.py` — including real PNG/SVG image bytes, a second
-reference to one image, and an EMF the reader must refuse), converts it through
-discovery path 1, then asserts on the produced `.docx`: it validates, every
-paragraph's text is present exactly once, headings/styles/alignment/lists/table
-cells read back correctly, the images land byte-for-byte with their geometry,
-order and alt text, the sibling is reused without reconversion — plus three
-negative arms (no plugin installed, `protocol` ≠ 1, corrupt input), each of which
-must fail *clearly* rather than crash.
+`tests/verify.py` is the end-to-end pass over one big fixture
+(`tests/make_fixture.py` — real PNG/SVG bytes, a second reference to one image,
+an EMF the reader must refuse). It converts through discovery path 1, then
+asserts on the produced `.docx`: it validates, every paragraph's text is present
+exactly once, headings/styles/alignment/lists/table cells read back correctly,
+the images land byte-for-byte with their geometry, order and alt text, the
+sibling is reused without reconversion — plus three negative arms (no plugin
+installed, `protocol` ≠ 1, corrupt input), each of which must fail *clearly*
+rather than crash. **38 checks, 0 failed.**
 
-Result on the build named above: **38 checks, 0 failed.**
+`tests/cells.py` is the suite that measures **this version's new coverage**, and
+its unit is a *cell*: one feature, measured **twice**. Every feature cell builds
+two documents from `tests/make_cell_fixture.py` — the feature present, and the
+same document with the construct removed — and a cell counts as passed only when
+**all three** hold:
 
-The two "no plugin" arms need nothing else to resolve a `.odt` dump-reader, so if
-you already have this plugin installed at discovery path 2 or 3 the harness
-reports them as `SKIP` with the path that shadowed them, rather than failing —
-a false failure here would accuse the binary of a defect it does not have.
+1. the feature appears in the converted `.docx` (the positive half);
+2. `officecli validate` on that `.docx` exits 0;
+3. the **feature-absent control** does not gain the feature, and still validates.
+
+The third is why a cell is not just a smoke test. Without it, a reader that
+invented a `w:hyperlink` everywhere would pass; without the second, one that
+produced a package Word refuses to open would pass. Both halves go through the
+same discovery path, so the construct under test is the only difference between
+them.
+
+| cell | feature on | control (feature absent) |
+|---|---|---|
+| `hyperlink` | `text:a` + absolute `href` → `w:hyperlink` + external rel | same sentence, no `text:a` → no `w:hyperlink`, no rel |
+| `mailto` | `text:a href="mailto:…"` → external rel with the `mailto:` target | same sentence, no `text:a` |
+| `merged-cells` | 2×3 grid with a 2-column, 2-row merge → `w:gridSpan`, `w:vMerge` restart + continue | same strings in a plain 2×3 grid → no `w:gridSpan`, no `w:vMerge`, 6 cells |
+| `vertical-text` | `text-position` / `text-line-through-style` → `w:vertAlign`, `w:strike` | identical text, no character styles → neither element |
+
+**4 cells, 51 assertions, 0 failed** — and the same suite run against the
+previous `0.2.0` reader gives **0 of 4 cells passed, 17 failed assertions**,
+with every control half still green on that arm. That is the measurement that
+makes a green run mean something: the failures are the features, not the
+harness.
+
+### `officecli plugins lint`
+
+The gate the upstream tool provides, run against every fixture:
+
+```bash
+officecli plugins lint ./plugin --fixture tests/…      # → Result: OK
+```
+
+It replays `plugin dump` and checks every emitted `--prop` key against the
+target format's own schema tree. All four cell fixtures and the big fixture
+(43 batch items) report `OK — every emitted prop is declared in the docx schema`
+on the version this README documents.
+
+The two "no plugin" arms in `verify.py` need nothing else to resolve a `.odt`
+dump-reader, so if you already have this plugin installed at discovery path 2 or
+3 the harness reports them as `SKIP` with the path that shadowed them, rather
+than failing — a false failure here would accuse the binary of a defect it does
+not have.
 
 ## Three upstream observations made while building this
 
