@@ -1,0 +1,74 @@
+name: tests
+
+on:
+  push:
+  pull_request:
+  workflow_dispatch:
+
+jobs:
+  suites:
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        # The two released officecli binaries this plugin is measured against.
+        # They are downloaded, not built: the plugin targets the binary a user
+        # actually installs, and the protocol surface differs between them.
+        officecli: ["1.0.160", "1.0.158"]
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          fetch-depth: 0          # tags, for the release-asset step below
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Fetch officecli ${{ matrix.officecli }}
+        run: |
+          set -euo pipefail
+          mkdir -p "$HOME/.local/bin"
+          curl -fsSL --retry 3 -o "$HOME/.local/bin/officecli" \
+            "https://github.com/iOfficeAI/OfficeCLI/releases/download/v${{ matrix.officecli }}/officecli-linux-x64"
+          chmod +x "$HOME/.local/bin/officecli"
+          echo "$HOME/.local/bin" >> "$GITHUB_PATH"
+          "$HOME/.local/bin/officecli" --version
+
+      - name: End-to-end suite
+        run: OFFICECLI_BIN="$HOME/.local/bin/officecli" python3 tests/verify.py
+
+      - name: Two-sided cell suite
+        run: OFFICECLI_BIN="$HOME/.local/bin/officecli" python3 tests/cells.py
+
+      - name: Schema lint over every fixture
+        run: |
+          set -euo pipefail
+          for f in hyperlink mailto merged-cells vertical-text footnote endnote; do
+            python3 tests/make_cell_fixture.py --feature "$f" --out "$RUNNER_TEMP/$f.odt"
+            "$HOME/.local/bin/officecli" plugins lint ./plugin --fixture "$RUNNER_TEMP/$f.odt"
+          done
+          python3 tests/make_fixture.py "$RUNNER_TEMP/full.odt"
+          "$HOME/.local/bin/officecli" plugins lint ./plugin --fixture "$RUNNER_TEMP/full.odt"
+
+      # Path 2 of the README's install table, from the published release asset.
+      # This is the line no local run could measure: the sandbox this plugin was
+      # developed in cannot reach github.com with curl, so the download, the
+      # discovery path and the conversion are exercised here instead.
+      - name: Install from the release asset and convert through it
+        if: matrix.officecli == '1.0.160'
+        run: |
+          set -euo pipefail
+          TAG="$(git describe --tags --abbrev=0)"
+          echo "release tag: $TAG"
+          mkdir -p "$HOME/.officecli/plugins/dump-reader/odt"
+          curl -fsSL --retry 3 -o "$HOME/.officecli/plugins/dump-reader/odt/plugin" \
+            "https://github.com/${{ github.repository }}/releases/download/$TAG/plugin"
+          chmod +x "$HOME/.officecli/plugins/dump-reader/odt/plugin"
+          # The asset is the tree, byte for byte — a release that drifted from
+          # its source would otherwise be measured as if it had not.
+          cmp plugin "$HOME/.officecli/plugins/dump-reader/odt/plugin"
+          "$HOME/.local/bin/officecli" plugins list
+          python3 tests/make_cell_fixture.py --feature footnote --out "$RUNNER_TEMP/installed.odt"
+          cd "$RUNNER_TEMP"
+          env -u OFFICECLI_PLUGIN_DUMP_READER_ODT "$HOME/.local/bin/officecli" get installed.odt /body
+          "$HOME/.local/bin/officecli" validate installed.docx
+          unzip -l installed.docx | grep -i footnotes.xml

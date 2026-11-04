@@ -3,7 +3,7 @@
 A **dump-reader plugin** for [officecli](https://github.com/iOfficeAI/OfficeCLI) that
 converts OpenDocument Text (`.odt`, LibreOffice Writer) into `.docx` — text,
 runs, headings, alignment, lists, tables (including **merged cells**),
-**images** and **hyperlinks**.
+**images**, **hyperlinks**, and **footnotes / endnotes**.
 
 `officecli get report.odt /body` converts the file once, writes the sibling
 `report.docx`, and every later command works on that `.docx`. The plugin speaks
@@ -11,11 +11,13 @@ runs, headings, alignment, lists, tables (including **merged cells**),
 §2.1/§5.1: a one-shot process that streams officecli batch commands as JSONL on
 stdout, which main replays into a fresh native file.
 
-**Version 0.3.0.** Verified against **officecli 1.0.160** (upstream `main` at
+**Version 0.4.0.** Verified against **officecli 1.0.160** (upstream `main` at
 [`c56512c8`](https://github.com/iOfficeAI/OfficeCLI/commit/c56512c8)) and against
-**1.0.158** ([`5e3e2627`](https://github.com/iOfficeAI/OfficeCLI/commit/5e3e2627))
-for the 0.2.0 behaviour, on macOS arm64 with Python 3.13. The suites need a
-binary; no other build tooling is involved.
+**1.0.158** ([`5e3e2627`](https://github.com/iOfficeAI/OfficeCLI/commit/5e3e2627)),
+with **43 checks** and **6 cells / 83 assertions** green on both, on macOS arm64
+with Python 3.13. The same two suites also run in CI on Linux against the
+released binaries — see [Tests in CI](#tests-in-ci). The suites need a binary;
+no other build tooling is involved.
 
 ## Requirements
 
@@ -35,9 +37,9 @@ discovery paths in protocol §3 — the first match wins:
 | 3 | `<dir of the officecli binary>/plugins/dump-reader/odt/plugin` | ✅ works, listed by `officecli plugins list` |
 | 4 | an executable `officecli-dump-reader-odt` or `officecli-odt` on `PATH` | not tested |
 
-**Measured (0.3.0):** path 2 works end to end — a clean
+**Measured (0.4.0):** path 2 works end to end — a clean
 `HOME=<dir>` with `plugin` at `~/.officecli/plugins/dump-reader/odt/plugin` is
-listed by `officecli plugins list` (name `officecli-odt`, version `0.3.0`) and a
+listed by `officecli plugins list` (name `officecli-odt`, version `0.4.0`) and a
 `.odt` converts through it with no environment variable set, producing a
 sibling `.docx` that validates. That is the path the release notes use.
 
@@ -99,6 +101,14 @@ Declared in the manifest `supports` field, and each item is asserted by
   hyperlink`, which gives a `w:hyperlink` element plus an external relationship
   (`TargetMode="External"`) pointing at the URL. `mailto:` targets work the same
   way
+- **footnotes and endnotes** — `text:note` → `add --type footnote|endnote` on the
+  paragraph that contains it, so the marker lands at the anchor instead of at the
+  end of the sentence, and the body goes to `word/footnotes.xml` or
+  `word/endnotes.xml`. `text:note-class` picks which: `endnote` is routed to the
+  endnote part, everything else to the footnote part. A note holds one paragraph
+  in the docx vocabulary, so a multi-paragraph body is joined with a line break
+  (`<w:br/>`) and the join is reported. The source's citation number is not
+  carried — Word numbers the note itself
 - **images** — `draw:frame`/`draw:image` for **PNG, JPEG, GIF, BMP, TIFF and
   SVG**, placed inline where they sit in the text flow (see below)
 
@@ -161,7 +171,6 @@ python3 plugin dump report.odt > /dev/null   # stdout is the JSONL command strea
   of that cell survives)
 - image formats outside the six above — EMF and WMF in particular, which have no
   magic bytes this reader can trust
-- footnotes and endnotes (`text:note`)
 - fields, cross-references, bookmarks, tracked changes (flattened to text)
 - nested tables
 - **internal anchors** — `text:a xlink:href="#name"` points at a
@@ -185,8 +194,8 @@ with exit 3 rather than converted into a wrong-shaped document.
 Two suites, both standard-library Python, both driven by `OFFICECLI_BIN`:
 
 ```bash
-OFFICECLI_BIN=/path/to/officecli python3 tests/verify.py   # 38 checks
-OFFICECLI_BIN=/path/to/officecli python3 tests/cells.py    # 4 cells, 51 assertions
+OFFICECLI_BIN=/path/to/officecli python3 tests/verify.py   # 43 checks
+OFFICECLI_BIN=/path/to/officecli python3 tests/cells.py    # 6 cells, 83 assertions
 ```
 
 `tests/verify.py` is the end-to-end pass over one big fixture
@@ -197,7 +206,7 @@ exactly once, headings/styles/alignment/lists/table cells read back correctly,
 the images land byte-for-byte with their geometry, order and alt text, the
 sibling is reused without reconversion — plus three negative arms (no plugin
 installed, `protocol` ≠ 1, corrupt input), each of which must fail *clearly*
-rather than crash. **38 checks, 0 failed.**
+rather than crash. **43 checks, 0 failed.**
 
 `tests/cells.py` is the suite that measures **this version's new coverage**, and
 its unit is a *cell*: one feature, measured **twice**. Every feature cell builds
@@ -221,10 +230,15 @@ them.
 | `mailto` | `text:a href="mailto:…"` → external rel with the `mailto:` target | same sentence, no `text:a` |
 | `merged-cells` | 2×3 grid with a 2-column, 2-row merge → `w:gridSpan`, `w:vMerge` restart + continue | same strings in a plain 2×3 grid → no `w:gridSpan`, no `w:vMerge`, 6 cells |
 | `vertical-text` | `text-position` / `text-line-through-style` → `w:vertAlign`, `w:strike` | identical text, no character styles → neither element |
+| `footnote` | `text:note class="footnote"` mid-sentence → `w:footnoteReference` at the anchor + `word/footnotes.xml` holding the body | same sentence, note markup removed → no reference, no footnotes part, text unchanged |
+| `endnote` | `text:note class="endnote"` → `w:endnoteReference` + `word/endnotes.xml`, and **not** the footnote part | same sentence, note markup removed → no reference, no endnotes part |
 
-**4 cells, 51 assertions, 0 failed** — and the same suite run against the
-previous `0.2.0` reader gives **0 of 4 cells passed, 17 failed assertions**,
-with every control half still green on that arm. That is the measurement that
+**6 cells, 83 assertions, 0 failed** — and the same suite run against the
+**previous** reader gives **4 of 6 cells passed, 16 failed assertions**, with
+every control half still green on that arm. The two that flip are exactly the two
+new ones: `0.3.0` read a note's body *into the sentence* (`"Body text1The note
+body. more text."`) and wrote no note part at all. Run against `0.2.0` the same
+suite gives **0 of 6 cells, 33 failed assertions**. That is the measurement that
 makes a green run mean something: the failures are the features, not the
 harness.
 
@@ -237,7 +251,7 @@ officecli plugins lint ./plugin --fixture tests/…      # → Result: OK
 ```
 
 It replays `plugin dump` and checks every emitted `--prop` key against the
-target format's own schema tree. All four cell fixtures and the big fixture
+target format's own schema tree. All six cell fixtures and the big fixture
 (43 batch items) report `OK — every emitted prop is declared in the docx schema`
 on the version this README documents.
 
@@ -246,6 +260,21 @@ dump-reader, so if you already have this plugin installed at discovery path 2 or
 3 the harness reports them as `SKIP` with the path that shadowed them, rather
 than failing — a false failure here would accuse the binary of a defect it does
 not have.
+
+## Tests in CI
+
+`.github/workflows/test.yml` runs both suites on every push, in a matrix over the
+two released officecli binaries (`1.0.160`, `1.0.158`), downloaded from upstream
+releases rather than built — the plugin is measured against the binary a user
+installs. It also lints every fixture and, on the newer binary, installs the
+**published release asset** over HTTPS into discovery path 2 and converts a note
+fixture through it with no environment variable set.
+
+That last job exists because the machine this plugin was developed on cannot
+reach `github.com` with `curl` (the connection times out), so the release-asset
+line was the one thing the README could not measure locally. The runner measures
+it, and the job fails if the asset is not byte-identical to the tree it was built
+from (`cmp plugin …`) or if the converted output does not validate.
 
 ## Three upstream observations made while building this
 

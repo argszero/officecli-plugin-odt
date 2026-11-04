@@ -16,7 +16,8 @@ but the standard library.
 import argparse
 import zipfile
 
-FEATURES = ("hyperlink", "mailto", "merged-cells", "vertical-text")
+FEATURES = ("hyperlink", "mailto", "merged-cells", "vertical-text",
+            "footnote", "endnote")
 
 HEAD = '''<?xml version="1.0" encoding="UTF-8"?>
 <office:document-content
@@ -104,6 +105,19 @@ def body(feature, on):
         # Control: identical text, no character styles applied.
         return ('   <text:p>Water is H2O and E=mc2, '
                 'but this is wrong.</text:p>\n')
+
+    if feature in ("footnote", "endnote"):
+        # The note sits mid-sentence, so the marker's position is measurable:
+        # "Body text" <marker> " more text." The control keeps the visible
+        # sentence and drops the note markup entirely — including its body, so
+        # a reader that leaks the body into the paragraph is caught by the
+        # positive half's "body is not flattened" assertion.
+        if on:
+            return ('   <text:p>Body text<text:note text:note-class="%s" text:id="nt1">'
+                    '<text:note-citation>1</text:note-citation>'
+                    '<text:note-body><text:p>The note body.</text:p></text:note-body>'
+                    '</text:note> more text.</text:p>\n' % feature)
+        return '   <text:p>Body text more text.</text:p>\n'
 
     raise SystemExit("unknown feature: %s (known: %s)" % (feature, ", ".join(FEATURES)))
 

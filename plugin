@@ -60,7 +60,7 @@ MAX_REPEAT = 64          # guard against a table:number-columns-repeated bomb
 LIST_KINDS = {}
 MANIFEST = {
     "name": "officecli-odt",
-    "version": "0.3.0",
+    "version": "0.4.0",
     "protocol": 1,
     "kinds": ["dump-reader"],
     "extensions": [".odt"],
@@ -78,6 +78,7 @@ MANIFEST = {
         "lists:bullet,ordered",
         "tables:simple,merged-cells (colspan/rowspan)",
         "hyperlinks:external-url,mailto",
+        "footnotes,endnotes (text:note; one paragraph per note)",
         "images:png,jpeg,gif,bmp,tiff,svg (inline; sized from the frame)",
     ],
     "limits": {"maxFileSizeMb": 100},
@@ -446,7 +447,23 @@ def inline_items(elem, styles, inherited, skipped, zf):
                         out.append(("text", child.tail, props))
                     continue
                 elif ln == "note":
-                    skipped.note("text:note footnote/endnote (dropped)")
+                    # A footnote/endnote is its own element in the docx
+                    # vocabulary (`add --type footnote|endnote` under the
+                    # paragraph). Main appends its reference run at the *end* of
+                    # the paragraph's run list, so emitting it here in item order
+                    # is what puts the marker between "before" and "after"
+                    # instead of at the end of the sentence.
+                    kind, text, paras = note_text(child, styles, skipped, zf)
+                    if not text:
+                        skipped.note("text:note %s with an empty body (dropped)" % kind)
+                    else:
+                        if paras > 1:
+                            skipped.note("text:note %s with %d paragraphs "
+                                         "(joined with a line break)" % (kind, paras))
+                        out.append(("note", kind, text))
+                    if child.tail:
+                        out.append(("text", child.tail, props))
+                    continue
                 elif ln in ("change", "change-start", "change-end"):
                     skipped.note("tracked change markup (flattened)")
                 elif ln in ("bookmark", "bookmark-start", "bookmark-end",
@@ -475,6 +492,44 @@ def text_of_items(items):
     return "".join(it[1] for it in items if it[0] == "text")
 
 
+def note_text(note, styles, skipped, zf):
+    """The body of a `text:note`: (kind, text, paragraph count).
+
+    A note carries a single string in the docx vocabulary, so a multi-paragraph
+    body is joined with a line break — main renders "\n" as <w:br/> inside the
+    one note paragraph — and the caller reports that it happened. The citation
+    marker (`text:note-citation`) is deliberately not carried: Word numbers the
+    note itself, and the number in the source is that writer's own rendering of
+    a sequence this conversion re-creates.
+    """
+    kind = (note.get(q("text", "note-class")) or "footnote").strip().lower()
+    if kind not in ("footnote", "endnote"):
+        skipped.note("text:note class '%s' (emitted as a footnote)" % kind)
+        kind = "footnote"
+    body = note.find(q("text", "note-body"))
+    if body is None:
+        return kind, "", 0
+    paras = []
+    for kid in body:
+        if local(kid) != "p":
+            skipped.note("text:%s inside a note body (dropped)" % local(kid))
+            continue
+        base = style_props(styles, "paragraph", kid.get(q("text", "style-name")))
+        items = inline_items(kid, styles, base, skipped, zf)
+        for it in items:
+            if it[0] == "image":
+                skipped.note("image inside a note body (a note carries text only)")
+            elif it[0] == "note":
+                skipped.note("nested text:note inside a note body (dropped)")
+            elif it[0] == "link":
+                skipped.note("hyperlink inside a note body (text kept, link dropped)")
+        # Link text survives even though the link does not: the note is a string.
+        paras.append("".join(it[1] if it[0] == "text" else it[2]
+                             for it in items if it[0] in ("text", "link")))
+    paras = [p for p in paras if p]
+    return kind, "\n".join(paras), len(paras)
+
+
 # ---------------------------------------------------------------------------
 # emitters
 # ---------------------------------------------------------------------------
@@ -485,6 +540,7 @@ class Emitter:
         self.tbl = 0    # /body/tbl[N] counter
         self.pic = 0    # pictures emitted, for the end-of-run summary
         self.link = 0   # hyperlinks emitted
+        self.note = 0   # footnotes + endnotes emitted
 
     def emit(self, obj):
         sys.stdout.write(json.dumps(obj, ensure_ascii=False) + "\n")
@@ -511,6 +567,15 @@ class Emitter:
                         rp[key] = it[2][key] if key == "vertAlign" else "true"
                 self.emit({"command": "add", "parent": path, "type": "run",
                            "props": rp})
+                continue
+            if it[0] == "note":
+                _, kind, text = it
+                # Measured: main appends the reference run at the end of the
+                # paragraph's run list, so emitting the note in item order is
+                # what places the marker where the source had it.
+                self.note += 1
+                self.emit({"command": "add", "parent": path, "type": kind,
+                           "props": {"text": text}})
                 continue
             if it[0] == "link":
                 _, target, text, meta = it
@@ -791,6 +856,8 @@ def convert(path):
             walk_block(kid, em, styles, skipped, zf)
 
     skipped.report()
+    if em.note:
+        warn("emitted %d note(s)" % em.note)
     warn("emitted %d paragraph(s), %d table(s) and %d image(s)"
          % (em.p, em.tbl, em.pic))
     if em.p == 0 and em.tbl == 0:

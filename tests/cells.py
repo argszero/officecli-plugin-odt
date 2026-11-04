@@ -225,7 +225,64 @@ def cell_vertical_text(work):
     return cell
 
 
-CELLS = (cell_hyperlink, cell_mailto, cell_merged_cells, cell_vertical_text)
+def note_cell(work, cell, kind):
+    """text:note → w:<kind>Reference at the anchor + word/<kind>s.xml holding the body."""
+    on, rc, err = convert(cell, True, work)
+    off, rc2, err2 = convert(cell, False, work)
+    part = "word/%ss.xml" % kind                      # footnotes.xml / endnotes.xml
+    other = "word/%ss.xml" % ("endnote" if kind == "footnote" else "footnote")
+    ref = "<w:%sReference" % kind
+
+    check(cell, "on", "conversion exits 0", rc == 0, "rc=%d %s" % (rc, err.strip()[:160]))
+    check(cell, "on", "generated .docx validates", run(["validate", on])[0] == 0)
+    body = xml(on, "word/document.xml")
+    check(cell, "on", "a %s element is written" % ref, ref in body)
+    check(cell, "on", "the reference carries an id",
+          re.search(r'<w:%sReference[^>]*w:id="\d+"' % kind, body) is not None)
+    notes = xml(on, part)
+    check(cell, "on", "%s is written" % part, bool(notes))
+    check(cell, "on", "the note body lands in it", "The note body." in notes)
+    found = len(re.findall(r"<w:%s\b" % kind, notes))
+    check(cell, "on", "one real note beside the two separators", found == 3,
+          "%d <w:%s> in %s" % (found, kind, part))
+    # The marker's position is the whole point of an inline note: it has to sit
+    # between the text on either side of it, not at the end of the sentence.
+    ib, im, ia = (body.find("Body text"), body.find("%sReference" % kind),
+                  body.find("more text."))
+    check(cell, "on", "the marker sits between the two text runs",
+          -1 < ib < im < ia, "head=%d marker=%d tail=%d" % (ib, im, ia))
+    # A note body is not paragraph text: a reader that flattened it would read
+    # back as if the note had been typed into the sentence.
+    check(cell, "on", "the note body is NOT flattened into the paragraph",
+          "The note body." not in body)
+    check(cell, "on", "the other note part stays empty", xml(on, other) == "")
+    _, out = read_body(on)
+    check(cell, "on", "the paragraph text is unchanged", "Body text more text." in out,
+          out[:200])
+
+    check(cell, "off", "control conversion exits 0", rc2 == 0, err2.strip()[:160])
+    check(cell, "off", "control .docx validates", run(["validate", off])[0] == 0)
+    off_body = xml(off, "word/document.xml")
+    check(cell, "off", "control gains NO %s" % ref,
+          "<w:%sReference" % kind not in off_body)
+    check(cell, "off", "control gains NO %s" % part, xml(off, part) == "")
+    _, out = read_body(off)
+    check(cell, "off", "control text is intact", "Body text more text." in out, out[:200])
+    return cell
+
+
+def cell_footnote(work):
+    """text:note with note-class=footnote → w:footnoteReference + word/footnotes.xml."""
+    return note_cell(work, "footnote", "footnote")
+
+
+def cell_endnote(work):
+    """text:note with note-class=endnote → w:endnoteReference + word/endnotes.xml."""
+    return note_cell(work, "endnote", "endnote")
+
+
+CELLS = (cell_hyperlink, cell_mailto, cell_merged_cells, cell_vertical_text,
+         cell_footnote, cell_endnote)
 
 
 def main():

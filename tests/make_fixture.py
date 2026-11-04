@@ -55,6 +55,8 @@ CONTENT = '''<?xml version="1.0" encoding="UTF-8"?>
    <draw:frame draw:name="Block level" svg:width="1cm" svg:height="1cm"><draw:image xlink:href="Pictures/green.png"/></draw:frame>
    <text:p>After the table</text:p>
    <text:p>Text before <draw:frame draw:name="Unframed blue again"><draw:image xlink:href="Pictures/blue.png"/></draw:frame> text after.</text:p>
+   <text:p>Table note<text:note text:note-class="footnote" text:id="fn1"><text:note-citation>1</text:note-citation><text:note-body><text:p>Figures in thousands.</text:p></text:note-body></text:note> explains the table.</text:p>
+   <text:p>Source note<text:note text:note-class="endnote" text:id="en1"><text:note-citation>i</text:note-citation><text:note-body><text:p>Compiled from the ledger.</text:p></text:note-body></text:note> closes the document.</text:p>
   </office:text>
  </office:body>
 </office:document-content>

@@ -105,6 +105,30 @@ def main():
     rc, out, err = run(["get", sibling, "/body/tbl[1]/tr[2]/tc[1]"])
     check("table cell text", '"EMEA"' in out, out.strip()[:120])
 
+    # -- arm 3b: footnotes and endnotes --------------------------------------
+    # Two constructs with one shape: the marker sits at the anchor inside the
+    # paragraph, the body lives in its own part. Both are measured, because the
+    # reader routes them by text:note-class and must not hardcode one.
+    with zipfile.ZipFile(sibling) as z:
+        names = z.namelist()
+        fnote = z.read("word/footnotes.xml").decode("utf-8") if "word/footnotes.xml" in names else ""
+        enote = z.read("word/endnotes.xml").decode("utf-8") if "word/endnotes.xml" in names else ""
+        docxml = z.read("word/document.xml").decode("utf-8")
+    check("the footnote body lands in word/footnotes.xml",
+          "Figures in thousands." in fnote, "part %s" % ("present" if fnote else "absent"))
+    check("the endnote body lands in word/endnotes.xml",
+          "Compiled from the ledger." in enote, "part %s" % ("present" if enote else "absent"))
+    check("the footnote marker sits at its anchor",
+          0 <= docxml.find("Table note") < docxml.find("footnoteReference")
+          < docxml.find("explains the table"))
+    check("the endnote marker sits at its anchor",
+          0 <= docxml.find("Source note") < docxml.find("endnoteReference")
+          < docxml.find("closes the document"))
+    check("note bodies are not flattened into the paragraph text",
+          "Figures in thousands." not in docxml
+          and "Compiled from the ledger." not in docxml
+          and "Figures in thousands." not in joined)
+
     # -- arm 4: images -------------------------------------------------------
     # The source declares five translatable images (three PNGs, one SVG, and a
     # second reference to one of the PNGs) plus two the reader must refuse: an
