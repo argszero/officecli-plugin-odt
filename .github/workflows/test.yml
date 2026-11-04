@@ -8,13 +8,25 @@ on:
 jobs:
   suites:
     runs-on: ubuntu-latest
+    # 1.0.158's Linux asset is not reliably runnable on this image: across three
+    # runs of one unchanged commit it passed once and failed twice, always with
+    # "Could not load file or assembly 'System.IO.Compression.ZipFile,
+    # Version=10.0.0.0'" at the first document *before* the plugin is invoked —
+    # so it measures the environment, not this plugin. The arm stays in the
+    # matrix (its evidence is worth collecting) but it does not gate the build.
+    # 1.0.158's plugin behaviour is measured on macOS arm64; see the README.
+    continue-on-error: ${{ matrix.experimental }}
     strategy:
       fail-fast: false
       matrix:
         # The two released officecli binaries this plugin is measured against.
         # They are downloaded, not built: the plugin targets the binary a user
         # actually installs, and the protocol surface differs between them.
-        officecli: ["1.0.160", "1.0.158"]
+        include:
+          - officecli: "1.0.160"
+            experimental: false
+          - officecli: "1.0.158"
+            experimental: true
     steps:
       - uses: actions/checkout@v5
         with:

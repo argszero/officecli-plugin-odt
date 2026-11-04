@@ -285,6 +285,15 @@ Version=10.0.0.0'`. That was measured here: two runs of the same commit differed
 one green on both arms and one red on 1.0.158 alone. A `--version` answer is not
 evidence that a binary can open a document.
 
+**One arm is non-gating.** The `1.0.158` job stays in the matrix but does not fail
+the build: across three runs of one unchanged commit its *Linux* asset passed once
+and failed twice, each time with `Could not load file or assembly
+'System.IO.Compression.ZipFile, Version=10.0.0.0'` raised at the first document —
+before this plugin is invoked, so that failure measures the environment rather
+than the reader. The 1.0.158 numbers in this README come from macOS arm64, where
+the same suites are green; the Linux asset's behaviour is upstream's to fix, not
+this plugin's.
+
 ## Three upstream observations made while building this
 
 All are measurements on officecli 1.0.158 (`5e3e2627`), reported here because
