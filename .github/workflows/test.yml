@@ -23,6 +23,18 @@ jobs:
         with:
           python-version: "3.12"
 
+      # The released officecli assets are framework-dependent single files: they
+      # declare a dependency on Microsoft.NETCore.App 10.0.x (1.0.158 wants
+      # 10.0.13, 1.0.160 wants 10.0.14). A runner that only has an older runtime
+      # still starts the app — `--version` answers — and then dies on the first
+      # document with "Could not load file or assembly
+      # 'System.IO.Compression.ZipFile, Version=10.0.0.0'". Measured: one run
+      # passed both arms and a run of the same commit failed 1.0.158 that way, so
+      # the runtime is pinned here rather than inherited from the image.
+      - uses: actions/setup-dotnet@v5
+        with:
+          dotnet-version: "10.0.x"
+
       - name: Fetch officecli ${{ matrix.officecli }}
         run: |
           set -euo pipefail

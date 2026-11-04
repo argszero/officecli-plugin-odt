@@ -276,6 +276,15 @@ line was the one thing the README could not measure locally. The runner measures
 it, and the job fails if the asset is not byte-identical to the tree it was built
 from (`cmp plugin …`) or if the converted output does not validate.
 
+The workflow installs the **.NET 10 runtime** explicitly, because the released
+officecli assets are framework-dependent single files (`Microsoft.NETCore.App`
+10.0.13 for 1.0.158, 10.0.14 for 1.0.160) and a runner that only carries an older
+runtime still starts the app and answers `--version` — then dies at the first
+document with `Could not load file or assembly 'System.IO.Compression.ZipFile,
+Version=10.0.0.0'`. That was measured here: two runs of the same commit differed,
+one green on both arms and one red on 1.0.158 alone. A `--version` answer is not
+evidence that a binary can open a document.
+
 ## Three upstream observations made while building this
 
 All are measurements on officecli 1.0.158 (`5e3e2627`), reported here because
