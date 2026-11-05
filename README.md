@@ -157,7 +157,7 @@ same suites also run in CI on Linux against the same released binaries
 | endnotes | ✅ | cell `endnote` (16), `verify.py` | `word/endnotes.xml`, and *not* the footnote part |
 | **headers** | ✅ **new in 0.5.0** | cell `header-footer` (20), `verify.py` | master page in `styles.xml` → `word/header1.xml` + `w:headerReference` |
 | **footers** | ✅ **new in 0.5.0** | cell `header-footer` (20), `verify.py` | `word/footer1.xml` + `w:footerReference`, alignment carried |
-| even-page (mirrored) header/footer | ✅ | not yet a cell | `style:header-left` / `style:footer-left` → the `even` scope |
+| even-page (mirrored) header/footer | ✅ | measured by hand, not a cell | `style:header-left` / `style:footer-left` → the `even` scope: 3 parts (`header1`, `header2`, `footer1`), `w:headerReference` types `even`/`default`, `validate` clean |
 | images: PNG, JPEG, GIF, BMP, TIFF, SVG | ✅ | `verify.py` | inline, bytes byte-identical, sized from the frame |
 | SVG 1×1 PNG fallback | ✅ | `verify.py` | 5 pictures → 6 media parts |
 | shapes, charts, embedded objects, text boxes | ❌ | `verify.py` (a text box's text is dropped) | reported |
