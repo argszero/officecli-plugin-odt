@@ -87,6 +87,26 @@ def read_body(docx):
     return rc, out
 
 
+def read_root(docx):
+    """A header/footer hangs off the document root, not off /body."""
+    rc, out, err = run(["get", docx, "/", "--depth", "1"])
+    return rc, out
+
+
+def parts(docx):
+    with zipfile.ZipFile(docx) as z:
+        return set(z.namelist())
+
+
+def num_formats(numbering):
+    """ilvl → numFmt, read out of the numbering part's own level definitions."""
+    out = {}
+    for m in re.finditer(r'<w:lvl w:ilvl="(\d+)"[^>]*>(.*?)</w:lvl>', numbering, re.S):
+        fmt = re.search(r'<w:numFmt w:val="([^"]+)"', m.group(2))
+        out[m.group(1)] = fmt.group(1) if fmt else None
+    return out
+
+
 # ---------------------------------------------------------------------------
 # cells
 # ---------------------------------------------------------------------------
@@ -281,8 +301,107 @@ def cell_endnote(work):
     return note_cell(work, "endnote", "endnote")
 
 
+def cell_header_footer(work):
+    """office:master-styles header/footer → word/header*.xml + footer*.xml + references."""
+    cell = "header-footer"
+    on, rc, err = convert(cell, True, work)
+    off, rc2, err2 = convert(cell, False, work)
+
+    check(cell, "on", "conversion exits 0", rc == 0, "rc=%d %s" % (rc, err.strip()[:160]))
+    check(cell, "on", "generated .docx validates", run(["validate", on])[0] == 0)
+    names = parts(on)
+    hdr = sorted(n for n in names if re.match(r"word/header\d+\.xml$", n))
+    ftr = sorted(n for n in names if re.match(r"word/footer\d+\.xml$", n))
+    check(cell, "on", "a header part is written", len(hdr) == 1, ", ".join(sorted(names)))
+    check(cell, "on", "a footer part is written", len(ftr) == 1, ", ".join(sorted(names)))
+    hbody = xml(on, hdr[0]) if hdr else ""
+    fbody = xml(on, ftr[0]) if ftr else ""
+    check(cell, "on", "the header carries its text", "Quarterly report" in hbody, hbody[:160])
+    check(cell, "on", "the footer carries its text", "Internal use only" in fbody, fbody[:160])
+    check(cell, "on", "the header keeps its alignment",
+          re.search(r'<w:jc w:val="right"\s*/>', hbody) is not None, hbody[:200])
+    check(cell, "on", "the footer keeps its alignment",
+          re.search(r'<w:jc w:val="center"\s*/>', fbody) is not None, fbody[:200])
+    doc = xml(on, "word/document.xml")
+    check(cell, "on", "the section references the header",
+          re.search(r'<w:headerReference w:type="default"', doc) is not None, doc[:200])
+    check(cell, "on", "the section references the footer",
+          re.search(r'<w:footerReference w:type="default"', doc) is not None)
+    # A decoration is its own part and never body text. Without this, a reader
+    # that dumped the header into the paragraph would pass on the part existing.
+    check(cell, "on", "the header text is NOT in the document body",
+          "Quarterly report" not in doc)
+    check(cell, "on", "the footer text is NOT in the document body",
+          "Internal use only" not in doc)
+    check(cell, "on", "the body paragraph survives", "Page body text." in doc)
+    _, out = read_root(on)
+    check(cell, "on", "read-back reports both references",
+          "headerRef.default=/header[1]" in out
+          and "footerRef.default=/footer[1]" in out, out[:200])
+
+    check(cell, "off", "control conversion exits 0", rc2 == 0, err2.strip()[:160])
+    check(cell, "off", "control .docx validates", run(["validate", off])[0] == 0)
+    onames = parts(off)
+    check(cell, "off", "control gains NO header part",
+          not [n for n in onames if re.match(r"word/header\d+\.xml$", n)],
+          ", ".join(sorted(onames)))
+    check(cell, "off", "control gains NO footer part",
+          not [n for n in onames if re.match(r"word/footer\d+\.xml$", n)])
+    odoc = xml(off, "word/document.xml")
+    check(cell, "off", "control section has no header/footer reference",
+          "<w:headerReference" not in odoc and "<w:footerReference" not in odoc)
+    check(cell, "off", "control body text is intact", "Page body text." in odoc)
+    return cell
+
+
+def cell_nested_list(work):
+    """A list inside a list item → the next numLevel, with its own number format."""
+    cell = "nested-list"
+    on, rc, err = convert(cell, True, work)
+    off, rc2, err2 = convert(cell, False, work)
+
+    check(cell, "on", "conversion exits 0", rc == 0, "rc=%d %s" % (rc, err.strip()[:160]))
+    check(cell, "on", "generated .docx validates", run(["validate", on])[0] == 0)
+    doc = xml(on, "word/document.xml")
+    levels = re.findall(r'<w:ilvl w:val="(\d+)"', doc)
+    check(cell, "on", "four list paragraphs", len(levels) == 4, str(levels))
+    # Position, not just counts: the nested pair must follow its parent item.
+    check(cell, "on", "the nesting sits where the source put it",
+          levels == ["0", "0", "1", "1"], str(levels))
+    nums = re.findall(r'<w:numId w:val="(\d+)"', doc)
+    check(cell, "on", "every item shares one numbering instance",
+          len(nums) == 4 and len(set(nums)) == 1, str(nums))
+    fmts = num_formats(xml(on, "word/numbering.xml"))
+    check(cell, "on", "level 0 numbers in decimal", fmts.get("0") == "decimal", str(fmts))
+    check(cell, "on", "level 1 numbers in its own format",
+          fmts.get("1") == "lowerLetter", str(fmts))
+    _, out = read_body(on)
+    check(cell, "on", "read-back reports the nested level",
+          "numLevel=1" in out, out[:200])
+    check(cell, "on", "read-back gives the nested level a distinct format",
+          re.search(r'"Nested one".*numLevel=1 numFmt=lowerLetter', out) is not None,
+          out[:300])
+    check(cell, "on", "read-back keeps the top level decimal",
+          re.search(r'"Top level one".*numLevel=0 numFmt=decimal', out) is not None,
+          out[:300])
+    check(cell, "on", "all four texts survive",
+          all(t in doc for t in ("Top level one", "Top level two",
+                                 "Nested one", "Nested two")))
+
+    check(cell, "off", "control conversion exits 0", rc2 == 0, err2.strip()[:160])
+    check(cell, "off", "control .docx validates", run(["validate", off])[0] == 0)
+    odoc = xml(off, "word/document.xml")
+    offlevels = re.findall(r'<w:ilvl w:val="(\d+)"', odoc)
+    check(cell, "off", "control keeps every item at level 0",
+          offlevels == ["0", "0", "0", "0"], str(offlevels))
+    check(cell, "off", "control text is intact",
+          all(t in odoc for t in ("Top level one", "Top level two",
+                                  "Nested one", "Nested two")))
+    return cell
+
+
 CELLS = (cell_hyperlink, cell_mailto, cell_merged_cells, cell_vertical_text,
-         cell_footnote, cell_endnote)
+         cell_footnote, cell_endnote, cell_header_footer, cell_nested_list)
 
 
 def main():

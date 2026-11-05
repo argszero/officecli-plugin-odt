@@ -29,6 +29,10 @@ CONTENT = '''<?xml version="1.0" encoding="UTF-8"?>
   <style:style style:name="PCenter" style:family="paragraph"><style:paragraph-properties fo:text-align="center"/></style:style>
   <text:list-style style:name="LBullet"><text:list-level-style-bullet text:level="1" text:bullet-char="\u2022"/></text:list-style>
   <text:list-style style:name="LNum"><text:list-level-style-number text:level="1" style:num-format="1"/></text:list-style>
+  <style:page-layout style:name="pm1">
+   <style:page-layout-properties fo:page-width="21cm" fo:page-height="29.7cm" fo:margin-top="2cm" fo:margin-bottom="2cm"/>
+   <style:header-style/><style:footer-style/>
+  </style:page-layout>
  </office:automatic-styles>
  <office:body>
   <office:text>
@@ -45,7 +49,11 @@ CONTENT = '''<?xml version="1.0" encoding="UTF-8"?>
     <text:list-item><text:p>Second bullet</text:p></text:list-item>
    </text:list>
    <text:list text:style-name="LNum">
-    <text:list-item><text:p>Step one</text:p></text:list-item>
+    <text:list-item><text:p>Step one</text:p>
+     <text:list text:style-name="LNum">
+      <text:list-item><text:p>Sub step one</text:p></text:list-item>
+     </text:list>
+    </text:list-item>
     <text:list-item><text:p>Step two</text:p></text:list-item>
    </text:list>
    <table:table table:name="Metrics">
@@ -62,10 +70,28 @@ CONTENT = '''<?xml version="1.0" encoding="UTF-8"?>
 </office:document-content>
 '''
 
+# ODF keeps office:master-styles in styles.xml, beside content.xml — a Writer
+# file never carries a header in content.xml, so the fixture must not either.
+STYLES = '''<?xml version="1.0" encoding="UTF-8"?>
+<office:document-styles
+ xmlns:office="urn:oasis:names:tc:opendocument:xmlns:office:1.0"
+ xmlns:style="urn:oasis:names:tc:opendocument:xmlns:style:1.0"
+ xmlns:text="urn:oasis:names:tc:opendocument:xmlns:text:1.0"
+ office:version="1.2">
+ <office:master-styles>
+  <style:master-page style:name="Standard" style:page-layout-name="pm1">
+   <style:header><text:p>Quarterly Report</text:p></style:header>
+   <style:footer><text:p text:style-name="PCenter">Confidential</text:p></style:footer>
+  </style:master-page>
+ </office:master-styles>
+</office:document-styles>
+'''
+
 MANIFEST = '''<?xml version="1.0" encoding="UTF-8"?>
 <manifest:manifest xmlns:manifest="urn:oasis:names:tc:opendocument:xmlns:manifest:1.0" manifest:version="1.2">
  <manifest:file-entry manifest:full-path="/" manifest:media-type="application/vnd.oasis.opendocument.text"/>
  <manifest:file-entry manifest:full-path="content.xml" manifest:media-type="text/xml"/>
+ <manifest:file-entry manifest:full-path="styles.xml" manifest:media-type="text/xml"/>
  <manifest:file-entry manifest:full-path="Pictures/red.png" manifest:media-type="image/png"/>
  <manifest:file-entry manifest:full-path="Pictures/blue.png" manifest:media-type="image/png"/>
  <manifest:file-entry manifest:full-path="Pictures/green.png" manifest:media-type="image/png"/>
@@ -100,6 +126,7 @@ def main(out):
         z.writestr(zi, "application/vnd.oasis.opendocument.text")
         z.writestr("META-INF/manifest.xml", MANIFEST, zipfile.ZIP_DEFLATED)
         z.writestr("content.xml", CONTENT, zipfile.ZIP_DEFLATED)
+        z.writestr("styles.xml", STYLES, zipfile.ZIP_DEFLATED)
         z.writestr("Pictures/red.png", png(3, 3, (255, 0, 0)))
         z.writestr("Pictures/blue.png", png(96, 48, (0, 0, 255)))
         z.writestr("Pictures/green.png", png(2, 2, (0, 200, 0)))

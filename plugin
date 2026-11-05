@@ -60,7 +60,7 @@ MAX_REPEAT = 64          # guard against a table:number-columns-repeated bomb
 LIST_KINDS = {}
 MANIFEST = {
     "name": "officecli-odt",
-    "version": "0.4.0",
+    "version": "0.5.0",
     "protocol": 1,
     "kinds": ["dump-reader"],
     "extensions": [".odt"],
@@ -75,9 +75,10 @@ MANIFEST = {
         "inline-formatting:bold,italic,underline,strikethrough,super/subscript",
         "heading-levels:1-6",
         "alignment",
-        "lists:bullet,ordered",
+        "lists:bullet,ordered (nested levels)",
         "tables:simple,merged-cells (colspan/rowspan)",
         "hyperlinks:external-url,mailto",
+        "headers,footers (master page; default and even)",
         "footnotes,endnotes (text:note; one paragraph per note)",
         "images:png,jpeg,gif,bmp,tiff,svg (inline; sized from the frame)",
     ],
@@ -214,13 +215,17 @@ def fmt_pt(points):
 # style resolution
 # ---------------------------------------------------------------------------
 
-def collect_styles(root):
-    """(family, style-name) → {bold/italic/underline/align} from content.xml.
+def collect_styles(root, reset=True):
+    """(family, style-name) → {bold/italic/underline/align} for one XML part.
 
     Resolves style:parent-style-name one or more levels up, so a run span that
-    inherits from a named character style keeps its weight.
+    inherits from a named character style keeps its weight. A Writer package is
+    read twice: styles.xml carries the *named* styles, content.xml the
+    *automatic* ones, and the second call passes reset=False so both survive.
+    A name defined in both is taken from content.xml, the more specific part.
     """
-    LIST_KINDS.clear()
+    if reset:
+        LIST_KINDS.clear()
     for ls in root.iter(q("text", "list-style")):
         ls_name = ls.get(q("style", "name"))
         if not ls_name:
@@ -466,6 +471,15 @@ def inline_items(elem, styles, inherited, skipped, zf):
                     continue
                 elif ln in ("change", "change-start", "change-end"):
                     skipped.note("tracked change markup (flattened)")
+                elif ln in ("page-number", "page-count", "date", "time",
+                            "chapter", "title", "subject", "author",
+                            "initial-creator", "creation-date", "creation-time",
+                            "modification-date", "modification-time",
+                            "print-date", "print-time", "description", "keywords"):
+                    # A field is computed by the writer, not stored: only the
+                    # cached text is in the file, so that is all that survives.
+                    skipped.note("text:%s field (flattened to its cached text)"
+                                 % ln)
                 elif ln in ("bookmark", "bookmark-start", "bookmark-end",
                             "reference-mark", "reference-mark-start", "reference-mark-end",
                             "soft-page-break", "ruby"):
@@ -541,10 +555,25 @@ class Emitter:
         self.pic = 0    # pictures emitted, for the end-of-run summary
         self.link = 0   # hyperlinks emitted
         self.note = 0   # footnotes + endnotes emitted
+        self.deco = 0   # headers + footers emitted
 
     def emit(self, obj):
         sys.stdout.write(json.dumps(obj, ensure_ascii=False) + "\n")
         sys.stdout.flush()
+
+    def decoration(self, kind, scope, text, align):
+        """One header or footer part. It hangs off the document root, not the body.
+
+        `type` is the docx *scope* (default/first/even), not the element kind:
+        the command's own "type" already names that.
+        """
+        props = {"text": text}
+        if scope != "default":
+            props["type"] = scope
+        if align:
+            props["align"] = align
+        self.deco += 1
+        self.emit({"command": "add", "parent": "/", "type": kind, "props": props})
 
     def paragraph(self, items, para_props):
         self.p += 1
@@ -640,6 +669,100 @@ class Emitter:
                                         "continue", 0))
         for path, mode, _span in vmerges:
             self.emit({"command": "set", "path": path, "props": {"vmerge": mode}})
+
+# ---------------------------------------------------------------------------
+# master pages: headers and footers
+# ---------------------------------------------------------------------------
+
+# ODF hangs a header/footer on a *master page*, not on the section. The
+# `-left` variants are the left-hand (even) pages of a mirrored layout, which is
+# docx's `even` scope. ODF has no `style:header-first`: a different first page is
+# a separate master page, so that case is reported instead of guessed at.
+DECORATIONS = (
+    ("header", "header", "default"),
+    ("footer", "footer", "default"),
+    ("header", "header-left", "even"),
+    ("footer", "footer-left", "even"),
+)
+
+
+def master_pages(root):
+    ms = root.find(q("office", "master-styles"))
+    if ms is None:
+        return []
+    return [e for e in ms if local(e) == "master-page"]
+
+
+def used_master_page(pages, text_el, skipped):
+    """The master page the first block asks for, else Standard, else the first."""
+    if not pages:
+        return None
+    named = None
+    for el in text_el.iter():
+        v = el.get(q("style", "master-page-name"))
+        if v:
+            named = v
+            break
+    if named:
+        for p in pages:
+            if p.get(q("style", "name")) == named:
+                return p
+        skipped.note("style:master-page-name '%s' is not among the master pages "
+                     "(the first one is used)" % named)
+    for p in pages:
+        if p.get(q("style", "name")) == "Standard":
+            return p
+    return pages[0]
+
+
+def decoration_text(elem, styles, skipped, zf):
+    """(text, align, paragraph count) for one style:header / style:footer."""
+    paras, aligns = [], []
+    for kid in elem:
+        if local(kid) != "p":
+            skipped.note("text:%s inside a header/footer (dropped)" % local(kid))
+            continue
+        base = style_props(styles, "paragraph", kid.get(q("text", "style-name")))
+        items = inline_items(kid, styles, base, skipped, zf)
+        for it in items:
+            if it[0] == "image":
+                skipped.note("image inside a header/footer (dropped)")
+            elif it[0] == "note":
+                skipped.note("text:note inside a header/footer (dropped)")
+            elif it[0] == "link":
+                skipped.note("hyperlink inside a header/footer (text kept, link dropped)")
+        # A part is one string here; a link's text survives, the link does not.
+        text = "".join(it[1] if it[0] == "text" else it[2]
+                       for it in items if it[0] in ("text", "link"))
+        if text:
+            paras.append(text)
+            aligns.append(base.get("align"))
+    if not paras:
+        return "", None, 0
+    if len(set(a for a in aligns if a)) > 1:
+        skipped.note("header/footer paragraphs disagree on alignment "
+                     "(the first one wins)")
+    return "\n".join(paras), next((a for a in aligns if a), None), len(paras)
+
+
+def emit_master_page(page, total, em, styles, skipped, zf):
+    for kind, tag, scope in DECORATIONS:
+        elem = page.find(q("style", tag))
+        if elem is None:
+            continue
+        text, align, n = decoration_text(elem, styles, skipped, zf)
+        if not text:
+            skipped.note("empty style:%s (dropped)" % tag)
+            continue
+        if n > 1:
+            skipped.note("style:%s with %d paragraphs "
+                         "(joined with a line break)" % (tag, n))
+        em.decoration(kind, scope, text, align)
+    if total > 1:
+        skipped.note("%d other master page(s) not converted "
+                     "(a different first page is a separate master page in ODF)"
+                     % (total - 1))
+
 
 # ---------------------------------------------------------------------------
 # document walk
@@ -777,8 +900,14 @@ def walk_block(elem, em, styles, skipped, zf, list_kind=None, level=0):
             if local(item) != "list-item":
                 continue
             for kid in item:
+                # A list *inside* a list item is the next level down. The level
+                # was previously passed through unchanged, so a nested list
+                # emitted at its parent's depth and every item read back as one
+                # flat run.
+                nested = local(kid) == "list"
                 walk_block(kid, em, styles, skipped, zf,
-                           list_kind=kind, level=level)
+                           list_kind=kind,
+                           level=level + 1 if nested else level)
         return
 
     if ln == "table":
@@ -836,7 +965,25 @@ def convert(path):
             sys.stderr.write("content.xml is not well-formed XML: %s\n" % exc)
             return 2
 
-        styles, _raw = collect_styles(root)
+        # styles.xml is where Writer keeps the named styles *and* the master
+        # pages that carry headers and footers; content.xml carries the
+        # automatic styles the body refers to. A package without styles.xml is
+        # legal, so its absence is not an error.
+        styles_root = None
+        try:
+            styles_root = ET.fromstring(zf.read("styles.xml"))
+        except KeyError:
+            pass
+        except ET.ParseError as exc:
+            skipped.note("styles.xml is not well-formed XML (%s); its named "
+                         "styles and master pages are ignored" % exc)
+
+        if styles_root is not None:
+            styles, _raw = collect_styles(styles_root)
+            automatic, _raw2 = collect_styles(root, reset=False)
+            styles.update(automatic)
+        else:
+            styles, _raw = collect_styles(root)
 
         body = root.find(q("office", "body"))
         if body is None:
@@ -852,10 +999,22 @@ def convert(path):
         # The package stays open for the walk: image bytes are read straight out
         # of it and carried in the emitted commands.
         em = Emitter()
+        # Headers and footers live on the master page, which sits beside
+        # office:body rather than inside it, so they are read before the walk.
+        pages = master_pages(styles_root) if styles_root is not None else []
+        if not pages:
+            # Non-conforming packages (and older fixtures) keep the master page
+            # beside the body instead; it is honoured rather than ignored.
+            pages = master_pages(root)
+        page = used_master_page(pages, text_el, skipped)
+        if page is not None:
+            emit_master_page(page, len(pages), em, styles, skipped, zf)
         for kid in text_el:
             walk_block(kid, em, styles, skipped, zf)
 
     skipped.report()
+    if em.deco:
+        warn("emitted %d header/footer part(s)" % em.deco)
     if em.note:
         warn("emitted %d note(s)" % em.note)
     warn("emitted %d paragraph(s), %d table(s) and %d image(s)"

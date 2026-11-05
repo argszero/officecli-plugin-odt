@@ -90,8 +90,17 @@ def main():
     check("centered paragraph", has(r'"Centered line" .*align=center'))
     check("bullet list items", len(re.findall(r'listStyle=bullet', joined)) == 2,
           "found %d" % len(re.findall(r'listStyle=bullet', joined)))
-    check("ordered list items", len(re.findall(r'listStyle=ordered', joined)) == 2,
-          "found %d" % len(re.findall(r'listStyle=ordered', joined)))
+    check("ordered list items", len(re.findall(r'listStyle=ordered', joined)) == 3,
+          "found %d (two top-level items and one sublist item)"
+          % len(re.findall(r'listStyle=ordered', joined)))
+    # A list inside a list item is the next numLevel, which docx numbers with
+    # its own format: level 0 decimal, level 1 lowerLetter.
+    check("the sublist item is one level down",
+          re.search(r'"Sub step one".*numLevel=1', joined) is not None,
+          " | ".join(l[:120] for l in lines if "Sub step one" in l))
+    check("the top-level items stay at level 0",
+          re.search(r'"Step one".*numLevel=0', joined) is not None
+          and re.search(r'"Step two".*numLevel=0', joined) is not None)
     check("table present as 2x2", has(r'\(table\).*cols=2 rows=2'))
     check("trailing paragraph after table", has(r'"After the table"'))
 
@@ -128,6 +137,28 @@ def main():
           "Figures in thousands." not in docxml
           and "Compiled from the ledger." not in docxml
           and "Figures in thousands." not in joined)
+
+    # -- arm 3c: headers and footers (office:master-styles) -------------------
+    # They hang off the document root rather than the body, so they are read
+    # from `/` and from their own parts.
+    with zipfile.ZipFile(sibling) as z:
+        names3 = z.namelist()
+        hparts = [n for n in names3 if re.match(r"word/header\d+\.xml$", n)]
+        fparts = [n for n in names3 if re.match(r"word/footer\d+\.xml$", n)]
+        hxml = z.read(hparts[0]).decode("utf-8") if hparts else ""
+        fxml = z.read(fparts[0]).decode("utf-8") if fparts else ""
+    check("a header part is written", len(hparts) == 1, ", ".join(hparts))
+    check("the header carries the master page's text", "Quarterly Report" in hxml,
+          hxml[:160])
+    check("a footer part is written", len(fparts) == 1, ", ".join(fparts))
+    check("the footer carries the master page's text", "Confidential" in fxml,
+          fxml[:160])
+    check("the footer keeps its paragraph alignment",
+          re.search(r'<w:jc w:val="center"\s*/>', fxml) is not None, fxml[:200])
+    rc, root_out, err = run(["get", sibling, "/", "--depth", "1"])
+    check("the section references both decorations",
+          "headerRef.default=" in root_out and "footerRef.default=" in root_out,
+          root_out[:200])
 
     # -- arm 4: images -------------------------------------------------------
     # The source declares five translatable images (three PNGs, one SVG, and a
