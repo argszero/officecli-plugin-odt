@@ -225,6 +225,13 @@ different vocabularies, and the prefix is what says which), and closes the class
 with a catch-all: an element the reader has no rule for is named, so a construct
 cannot leave a document in silence again.
 
+The same numbers come from a **different platform and a different transport**: the
+CI runner has no authenticated `gh`, so `fetch.py` falls through to plain HTTPS,
+and there it reports `0 kept, 39 fetched, 0 failed` — every byte matching the
+manifest's sha256 — before the suite prints the same 39-document verdict on
+Linux with 1.0.160. The development machine cannot reach `raw.githubusercontent.com`
+at all, so that half of the fetcher is the runner's measurement, not a local one.
+
 ## Images
 
 An image in the source becomes `add --type picture` on the paragraph that
@@ -421,13 +428,14 @@ one green on both arms and one red on 1.0.158 alone. A `--version` answer is not
 evidence that a binary can open a document.
 
 **One arm is non-gating.** The `1.0.158` job stays in the matrix but does not fail
-the build: across three runs of one unchanged commit its *Linux* asset passed once
-and failed twice, each time with `Could not load file or assembly
-'System.IO.Compression.ZipFile, Version=10.0.0.0'` raised at the first document —
-before this plugin is invoked, so that failure measures the environment rather
-than the reader. The 1.0.158 numbers in this README come from macOS arm64, where
-the same suites are green; the Linux asset's behaviour is upstream's to fix, not
-this plugin's.
+the build: across four runs of one unchanged commit its *Linux* asset passed once
+and failed three times, each time with an assembly load failure raised on a
+document — `Could not load file or assembly 'System.IO.Compression.ZipFile,
+Version=10.0.0.0'` on two of them and `'System.Private.Xml, Version=10.0.0.0'` on
+the 0.6.0 run — before this plugin has done anything with the output, so that
+failure measures the environment rather than the reader. The 1.0.158 numbers in
+this README come from macOS arm64, where the same suites are green; the Linux
+asset's behaviour is upstream's to fix, not this plugin's.
 
 ## Three upstream observations made while building this
 
