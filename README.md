@@ -13,13 +13,14 @@ answer to "will my document survive the conversion".
 §2.1/§5.1: a one-shot process that streams officecli batch commands as JSONL on
 stdout, which main replays into a fresh native file.
 
-**Version 0.5.0.** Verified against **officecli 1.0.160** (upstream `main` at
+**Version 0.6.0.** Verified against **officecli 1.0.160** (upstream `main` at
 [`c56512c8`](https://github.com/iOfficeAI/OfficeCLI/commit/c56512c8)) and against
 **1.0.158** ([`5e3e2627`](https://github.com/iOfficeAI/OfficeCLI/commit/5e3e2627)),
-with **51 checks** and **8 cells / 118 assertions** green on both, on macOS arm64
-with Python 3.13. The same two suites also run in CI on Linux against the
-released binaries — see [Tests in CI](#tests-in-ci). The suites need a binary;
-no other build tooling is involved.
+with **51 checks**, **8 cells / 118 assertions** and a **39-document foreign
+corpus** green on both, on macOS arm64 with Python 3.13. The same three suites
+also run in CI on Linux against the released binaries — see
+[Tests in CI](#tests-in-ci). The suites need a binary; no other build tooling is
+involved.
 
 ## Requirements
 
@@ -39,9 +40,9 @@ discovery paths in protocol §3 — the first match wins:
 | 3 | `<dir of the officecli binary>/plugins/dump-reader/odt/plugin` | ✅ works, listed by `officecli plugins list` |
 | 4 | an executable `officecli-dump-reader-odt` or `officecli-odt` on `PATH` | not tested |
 
-**Measured (0.5.0):** path 2 works end to end — a clean
+**Measured (0.6.0):** path 2 works end to end — a clean
 `HOME=<dir>` with `plugin` at `~/.officecli/plugins/dump-reader/odt/plugin` is
-listed by `officecli plugins list` (name `officecli-odt`, version `0.5.0`) and a
+listed by `officecli plugins list` (name `officecli-odt`, version `0.6.0`) and a
 `.odt` converts through it with no environment variable set, producing a
 sibling `.docx` that validates. That is the path the release notes use.
 
@@ -140,7 +141,7 @@ All of it was measured on **macOS arm64, officecli 1.0.160 and 1.0.158**; the
 same suites also run in CI on Linux against the same released binaries
 ([Tests in CI](#tests-in-ci)).
 
-| construct | 0.5.0 | asserted by | notes |
+| construct | 0.6.0 | asserted by | notes |
 |---|---|---|---|
 | paragraphs and text | ✅ | `verify.py`, every cell | each paragraph's text appears exactly once |
 | bold / italic / underline | ✅ | `verify.py` | `fo:font-weight`, `fo:font-style`, `style:text-underline-style` |
@@ -166,12 +167,63 @@ same suites also run in CI on Linux against the same released binaries
 | EMF / WMF and other image formats | ❌ | `verify.py` | refused with a warning, never embedded under a guessed MIME |
 | fields: page number, page count, date, … | ❌ | measured by hand, not a cell | only the cached text survives, reported |
 | bookmarks, internal anchors | ❌ | `verify.py` | text kept, link dropped, reported |
+| **cross-references** (`bookmark-ref`, `reference-ref`, `note-ref`) | ❌ **named in 0.6.0** | corpus | cached text kept, reference dropped, each construct reported by its ODF name |
+| **user-field values** (`text:user-field-get`) | ❌ **named in 0.6.0** | corpus | cached value kept, the field dropped, reported |
+| **bibliography marks, form controls, embedded objects** | ❌ **named in 0.6.0** | corpus | `text:bibliography-mark`, `draw:control`, `draw:object` — each reported by name |
 | relative hrefs | ❌ | — | text kept, link dropped, reported |
 | tracked changes | ❌ | — | flattened to its text, reported |
 | nested tables | ❌ | — | reported |
 | page styles, page size, margins, column layout | ❌ | — | not converted |
 | table cell formatting beyond text | ❌ | — | bold/italic inside a cell is flattened |
 | `.fodt`, encrypted packages | ❌ | — | refused, exit 3 |
+
+## The foreign corpus
+
+Every other fixture in `tests/` is written by the same hand as the reader, so a
+construct read from the wrong package part — or skipped without a word — stays
+invisible in it. `tests/corpus.py` measures the reader against documents it did
+not make: **39 documents from 22 producers** — OpenOffice.org 2.0–3.1, OpenOffice
+4.x, NeoOffice 2.x–3.0, LibreOffice 3.5–5.2 and its dev alphas, odfpy, pandoc.
+
+The documents are **not committed**. They come from odfpy (GPL-2.0), LibreOffice
+(MPL-2.0) and pandoc (GPL-2.0-or-later), whose licences do not allow their bytes
+in an MIT repository, so what is committed is the manifest:
+`tests/corpus/sources.json` pins each file by repository, **commit**, path, size
+and sha256, and `tests/corpus/fetch.py` reconstitutes the exact bytes and refuses
+any that does not hash to the recorded value. A commit rather than a branch is
+what is pinned, so a run next month measures the same document. Provenance,
+per-source licences and the fetch protocol are in
+[`tests/corpus/README.md`](tests/corpus/README.md).
+
+```bash
+python3 tests/corpus/fetch.py                             # once, and after a manifest change
+OFFICECLI_BIN=/path/to/officecli python3 tests/corpus.py
+```
+
+Each document is judged on three things, and the second is what found the defects
+this release fixes:
+
+1. **it converts** — `get <doc> /body` exits 0 and the produced `.docx` validates.
+   A refusal that explains itself is recorded as a refusal, not as a failure.
+2. **every construct it cannot convert is named** — the reader's own report must
+   mention it. A construct that leaves the document without a word is the defect
+   worth hunting, because it looks exactly like a document that read fine.
+3. **nothing crashes or hangs** — no traceback, no timeout.
+
+Plus one cheap extra: a construct reported as *dropped* must not have its text in
+the produced document. A "dropped" that quietly lands is worse than silence.
+
+**Measured on both arms — macOS arm64, 1.0.160 and 1.0.158:** 38 documents convert
+and validate, 1 is refused with its reason (`nasty.odt`, an external DTD entity
+the well-formedness check rejects rather than parses), **0 silent drops, 0
+crashes, 0 timeouts**. Under 0.5.0 the same corpus had **8 documents with silent
+drops** across five constructs: `text:bookmark-ref` (4,013 of them in one
+document), `text:user-field-get`, `text:bibliography-mark`, `draw:control` and
+`draw:object` inside a frame. 0.6.0 reports all five, reports each by its **ODF
+name** rather than its bare local name (`text:note` and `draw:frame` are
+different vocabularies, and the prefix is what says which), and closes the class
+with a catch-all: an element the reader has no rule for is named, so a construct
+cannot leave a document in silence again.
 
 ## Images
 
@@ -232,7 +284,16 @@ python3 plugin dump report.odt > /dev/null   # stdout is the JSONL command strea
   of that cell survives)
 - image formats outside the six above — EMF and WMF in particular, which have no
   magic bytes this reader can trust
-- fields, cross-references, bookmarks, tracked changes (flattened to text)
+- fields, bookmarks and tracked changes — flattened to text, each reported
+- **cross-references** — `text:bookmark-ref`, `text:reference-ref` and
+  `text:note-ref` keep their cached text and lose the reference; a corpus
+  document carries 4,013 of them, and each one is counted in the report
+- **user fields** (`text:user-field-get`), **bibliography marks**
+  (`text:bibliography-mark`), **form controls** (`draw:control`) and **embedded
+  objects** (`draw:object`, `draw:object-ole`, `draw:plugin`): dropped or
+  flattened to their text, reported by ODF name
+- any element the reader has no rule for: reported by name from a catch-all, so
+  nothing in the text flow leaves without a word
 - nested tables
 - **internal anchors** — `text:a xlink:href="#name"` points at a
   `text:bookmark`, and bookmarks are not converted, so the text is kept and the
@@ -256,11 +317,13 @@ with exit 3 rather than converted into a wrong-shaped document.
 
 ## Verify it yourself
 
-Two suites, both standard-library Python, both driven by `OFFICECLI_BIN`:
+Three suites, all standard-library Python, all driven by `OFFICECLI_BIN`:
 
 ```bash
 OFFICECLI_BIN=/path/to/officecli python3 tests/verify.py   # 51 checks
 OFFICECLI_BIN=/path/to/officecli python3 tests/cells.py    # 8 cells, 118 assertions
+python3 tests/corpus/fetch.py                              # 39 foreign documents, by sha256
+OFFICECLI_BIN=/path/to/officecli python3 tests/corpus.py   # 39 documents, 22 producers
 ```
 
 `tests/verify.py` is the end-to-end pass over one big fixture
@@ -333,12 +396,14 @@ not have.
 
 ## Tests in CI
 
-`.github/workflows/test.yml` runs both suites on every push, in a matrix over the
-two released officecli binaries (`1.0.160`, `1.0.158`), downloaded from upstream
-releases rather than built — the plugin is measured against the binary a user
-installs. It also lints every fixture and, on the newer binary, installs the
-**published release asset** over HTTPS into discovery path 2 and converts a note
-fixture through it with no environment variable set.
+`.github/workflows/test.yml` runs all three suites on every push, in a matrix over
+the two released officecli binaries (`1.0.160`, `1.0.158`), downloaded from
+upstream releases rather than built — the plugin is measured against the binary a
+user installs. The corpus step fetches its documents from the pinned commits and
+fails the build on a single silent drop. The workflow also lints every fixture
+and, on the newer binary, installs the **published release asset** over HTTPS
+into discovery path 2 and converts a note fixture through it with no environment
+variable set.
 
 That last job exists because the machine this plugin was developed on cannot
 reach `github.com` with `curl` (the connection times out), so the release-asset

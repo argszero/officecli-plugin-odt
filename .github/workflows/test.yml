@@ -73,6 +73,17 @@ jobs:
           python3 tests/make_fixture.py "$RUNNER_TEMP/full.odt"
           "$HOME/.local/bin/officecli" plugins lint ./plugin --fixture "$RUNNER_TEMP/full.odt"
 
+      # Documents this reader did not make: OpenOffice.org, OpenOffice, NeoOffice,
+      # LibreOffice and pandoc output, pinned by commit and sha256 in
+      # tests/corpus/sources.json. Every other fixture here is written by the same
+      # hand as the reader, so a construct read from the wrong package part — or
+      # skipped without a word — stays invisible in them.
+      - name: Foreign corpus
+        run: |
+          set -euo pipefail
+          python3 tests/corpus/fetch.py
+          OFFICECLI_BIN="$HOME/.local/bin/officecli" python3 tests/corpus.py
+
       # Path 2 of the README's install table, from the published release asset.
       # This is the line no local run could measure: the sandbox this plugin was
       # developed in cannot reach github.com with curl, so the download, the

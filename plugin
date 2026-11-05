@@ -60,7 +60,7 @@ MAX_REPEAT = 64          # guard against a table:number-columns-repeated bomb
 LIST_KINDS = {}
 MANIFEST = {
     "name": "officecli-odt",
-    "version": "0.5.0",
+    "version": "0.6.0",
     "protocol": 1,
     "kinds": ["dump-reader"],
     "extensions": [".odt"],
@@ -115,6 +115,30 @@ def q(ns, tag):
 def local(elem):
     t = elem.tag
     return t.split("}", 1)[-1] if "}" in t else t
+
+
+NS_PREFIX = {
+    "urn:oasis:names:tc:opendocument:xmlns:office:1.0": "office",
+    "urn:oasis:names:tc:opendocument:xmlns:text:1.0": "text",
+    "urn:oasis:names:tc:opendocument:xmlns:drawing:1.0": "draw",
+    "urn:oasis:names:tc:opendocument:xmlns:style:1.0": "style",
+    "urn:oasis:names:tc:opendocument:xmlns:table:1.0": "table",
+    "urn:oasis:names:tc:opendocument:xmlns:svg-compatible:1.0": "svg",
+}
+
+
+def named(elem):
+    """The element as ODF spells it, e.g. 'text:bookmark-ref'.
+
+    A message carrying only the local name does not resolve for a reader: ODF
+    has both a text:note and a draw:frame, and the prefix is the one thing that
+    says which vocabulary a construct belongs to.
+    """
+    tag = elem.tag
+    if not isinstance(tag, str) or not tag.startswith("{"):
+        return local(elem)
+    uri, name = tag[1:].split("}", 1)
+    return "%s:%s" % (NS_PREFIX.get(uri, uri.rsplit("/", 1)[-1]), name)
 
 
 # ---------------------------------------------------------------------------
@@ -369,6 +393,10 @@ def frame_items(frame, zf, skipped):
     for kid in frame.iter():
         if local(kid) == "text-box":
             skipped.note("text box (draw:text-box): its text is dropped")
+        elif local(kid) in ("object", "object-ole", "plugin", "applet"):
+            # An embedded object — a formula, an OLE part — is a package of its
+            # own, not a raster this reader can carry.
+            skipped.note("%s embedded object (dropped)" % named(kid))
 
     images = [el for el in frame.iter() if local(el) == "image"]
     return image_items(images, width, height, zf, skipped, alt_hint)
@@ -484,12 +512,35 @@ def inline_items(elem, styles, inherited, skipped, zf):
                             "reference-mark", "reference-mark-start", "reference-mark-end",
                             "soft-page-break", "ruby"):
                     skipped.note("text:%s (dropped)" % ln)
+                elif ln in ("bookmark-ref", "reference-ref", "note-ref"):
+                    # A cross-reference points at a bookmark or a note. Its
+                    # cached text is what the reader shows, so that is kept; the
+                    # reference itself is not converted — and a document can
+                    # carry thousands of them (one corpus file has 4,013), so
+                    # staying quiet about it is not an option.
+                    skipped.note("%s cross-reference (text kept, reference dropped)"
+                                 % named(child))
+                elif ln in ("user-field-get", "user-field-set", "user-field-input"):
+                    skipped.note("%s (value kept as text, field dropped)" % named(child))
+                elif ln in ("bibliography-mark", "bibliography-source"):
+                    skipped.note("%s (citation anchor dropped)" % named(child))
+                elif ln in ("sequence", "expression", "variable-set", "variable-get",
+                            "variable-input", "meta", "meta-field", "measure",
+                            "ruby-text", "caption"):
+                    skipped.note("%s (not converted; its text is kept)" % named(child))
+                elif ln == "control":
+                    skipped.note("%s form control (dropped)" % named(child))
                 elif ln in ("custom-shape", "rect", "circle", "ellipse", "line",
                             "polygon", "polyline", "path", "connector", "caption",
                             "chart", "object", "object-ole", "plugin", "applet",
                             "floating-frame", "handle"):
                     # A drawing, not a picture: there is no raster to embed.
                     skipped.note("draw:%s (vector shape or embedded object, dropped)" % ln)
+                else:
+                    # The class, closed rather than patched name by name: any
+                    # element this reader has no rule for is named here, so a
+                    # construct cannot leave a document without a word again.
+                    skipped.note("%s (not converted; its text is kept)" % named(child))
                 # descend so nested text is not lost
                 walk(child, props)
             # The tail belongs to the parent's run of text, never to the child:
