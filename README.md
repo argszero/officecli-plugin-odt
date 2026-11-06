@@ -13,12 +13,14 @@ answer to "will my document survive the conversion".
 §2.1/§5.1: a one-shot process that streams officecli batch commands as JSONL on
 stdout, which main replays into a fresh native file.
 
-**Version 0.6.0.** Verified against **officecli 1.0.160** (upstream `main` at
+**Version 0.7.0.** Verified against **officecli 1.0.160** (upstream `main` at
 [`c56512c8`](https://github.com/iOfficeAI/OfficeCLI/commit/c56512c8)) and against
 **1.0.158** ([`5e3e2627`](https://github.com/iOfficeAI/OfficeCLI/commit/5e3e2627)),
 with **51 checks**, **8 cells / 118 assertions** and a **39-document foreign
-corpus** green on both, on macOS arm64 with Python 3.13. The same three suites
-also run in CI on Linux against the released binaries — see
+corpus** green on both, on macOS arm64 with Python 3.13. On that corpus the
+conversion is measured **word by word**: **40,536 source words** compared against
+the produced `.docx`, **0 lost without a word, 0 lost after being promised**. The
+same three suites also run in CI on Linux against the released binaries — see
 [Tests in CI](#tests-in-ci). The suites need a binary; no other build tooling is
 involved.
 
@@ -40,9 +42,9 @@ discovery paths in protocol §3 — the first match wins:
 | 3 | `<dir of the officecli binary>/plugins/dump-reader/odt/plugin` | ✅ works, listed by `officecli plugins list` |
 | 4 | an executable `officecli-dump-reader-odt` or `officecli-odt` on `PATH` | not tested |
 
-**Measured (0.6.0):** path 2 works end to end — a clean
+**Measured (0.7.0):** path 2 works end to end — a clean
 `HOME=<dir>` with `plugin` at `~/.officecli/plugins/dump-reader/odt/plugin` is
-listed by `officecli plugins list` (name `officecli-odt`, version `0.6.0`) and a
+listed by `officecli plugins list` (name `officecli-odt`, version `0.7.0`) and a
 `.odt` converts through it with no environment variable set, producing a
 sibling `.docx` that validates. That is the path the release notes use.
 
@@ -141,8 +143,9 @@ All of it was measured on **macOS arm64, officecli 1.0.160 and 1.0.158**; the
 same suites also run in CI on Linux against the same released binaries
 ([Tests in CI](#tests-in-ci)).
 
-| construct | 0.6.0 | asserted by | notes |
+| construct | 0.7.0 | asserted by | notes |
 |---|---|---|---|
+| **word fidelity** — every source word accounted for | ✅ **new in 0.7.0** | `tests/corpus.py` axis 4, 40,536 words | a word may be absent only when the report names the construct that held it; a report that promises the text is held to that promise |
 | paragraphs and text | ✅ | `verify.py`, every cell | each paragraph's text appears exactly once |
 | bold / italic / underline | ✅ | `verify.py` | `fo:font-weight`, `fo:font-style`, `style:text-underline-style` |
 | strikethrough, superscript, subscript | ✅ | cell `vertical-text` (14) | `style:text-line-through-style`, `style:text-position` → `strike`, `vertAlign` |
@@ -161,21 +164,21 @@ same suites also run in CI on Linux against the same released binaries
 | even-page (mirrored) header/footer | ✅ | measured by hand, not a cell | `style:header-left` / `style:footer-left` → the `even` scope: 3 parts (`header1`, `header2`, `footer1`), `w:headerReference` types `even`/`default`, `validate` clean |
 | images: PNG, JPEG, GIF, BMP, TIFF, SVG | ✅ | `verify.py` | inline, bytes byte-identical, sized from the frame |
 | SVG 1×1 PNG fallback | ✅ | `verify.py` | 5 pictures → 6 media parts |
-| shapes, charts, embedded objects, text boxes | ❌ | `verify.py` (a text box's text is dropped) | reported |
-| floating image position | ❌ | — | size kept, anchor lost, reported |
-| images inside a table cell | ❌ | `verify.py` | reported |
-| EMF / WMF and other image formats | ❌ | `verify.py` | refused with a warning, never embedded under a guessed MIME |
-| fields: page number, page count, date, … | ❌ | measured by hand, not a cell | only the cached text survives, reported |
-| bookmarks, internal anchors | ❌ | `verify.py` | text kept, link dropped, reported |
-| **cross-references** (`bookmark-ref`, `reference-ref`, `note-ref`) | ❌ **named in 0.6.0** | corpus | cached text kept, reference dropped, each construct reported by its ODF name |
-| **user-field values** (`text:user-field-get`) | ❌ **named in 0.6.0** | corpus | cached value kept, the field dropped, reported |
-| **bibliography marks, form controls, embedded objects** | ❌ **named in 0.6.0** | corpus | `text:bibliography-mark`, `draw:control`, `draw:object` — each reported by name |
-| relative hrefs | ❌ | — | text kept, link dropped, reported |
-| tracked changes | ❌ | — | flattened to its text, reported |
-| nested tables | ❌ | — | reported |
-| page styles, page size, margins, column layout | ❌ | — | not converted |
-| table cell formatting beyond text | ❌ | — | bold/italic inside a cell is flattened |
-| `.fodt`, encrypted packages | ❌ | — | refused, exit 3 |
+| shapes, charts, embedded objects, text boxes | ❌ | `verify.py`; corpus `ClimateChange2.odt`, `PageBackground.odt`, `fdo68839.odt`, `fdo90130-1.odt` | a text box's text is dropped; reported. **No corpus document carries a chart** |
+| floating image position | ❌ | corpus `PageBackground.odt` (page-anchored), `ClimateChange2.odt` (paragraph-anchored) | size kept, anchor lost, reported |
+| images inside a table cell | ❌ | corpus `fdo47267-3.odt`; `verify.py` | reported |
+| EMF / WMF and other image formats | ❌ | `verify.py` only — **no corpus document carries one** | refused with a warning, never embedded under a guessed MIME |
+| fields: page number, page count, date, … | ❌ | corpus `api-for-odfpy.odt`, `headerfooter.odt`, `annotation-formatting.odt` | only the cached text survives, reported |
+| bookmarks, internal anchors | ❌ | corpus `api-for-odfpy.odt` (540 start / 540 end), `empty-svg-family-name.odt` | text kept, link dropped, reported |
+| **cross-references** (`bookmark-ref`, `reference-ref`, `note-ref`) | ❌ **named in 0.6.0** | corpus `api-for-odfpy.odt` (4,013 of them) | cached text kept, reference dropped, each construct reported by its ODF name |
+| **user-field values** (`text:user-field-get`) | ❌ **named in 0.6.0** | corpus `userfields.odt`, `userfields_ooo3.odt` | cached value kept, the field dropped, reported |
+| **bibliography marks, form controls, embedded objects** | ❌ **named in 0.6.0** | corpus `BibliographyEntryField.odt`, `citation.odt`, `dateFormFormats.odt`, `fdo68839.odt` | `text:bibliography-mark`, `draw:control`, `draw:object` — each reported by name |
+| relative hrefs | ❌ | corpus `api-for-odfpy.odt` | text kept, link dropped, reported |
+| tracked changes | ❌ | corpus `fdo47267-3.odt` | flattened to its text, reported |
+| nested tables | ❌ | corpus `fdo37606.odt`, `fdo47267-3.odt`, `simpletable.odt` | reported |
+| page styles, page size, margins, column layout | ❌ | corpus — a `style:page-layout` in **38 of 39** documents, `style:columns` in 5 (`BibliographyEntryField.odt`, `Electra.odt`, `PageBackground.odt`, `api-for-odfpy.odt`, `fdo53210.odt`) | not converted, not reported |
+| table cell formatting beyond text | ❌ | corpus `fdo37606.odt`, `fdo47267-3.odt`, `simpletable.odt` | bold/italic inside a cell is flattened |
+| `.fodt`, encrypted packages | ❌ | not a corpus case — refused before anything is read | refused, exit 3 |
 
 ## The foreign corpus
 
@@ -200,8 +203,8 @@ python3 tests/corpus/fetch.py                             # once, and after a ma
 OFFICECLI_BIN=/path/to/officecli python3 tests/corpus.py
 ```
 
-Each document is judged on three things, and the second is what found the defects
-this release fixes:
+Each document is judged on four things, and the last two are what found the
+defects this release fixes:
 
 1. **it converts** — `get <doc> /body` exits 0 and the produced `.docx` validates.
    A refusal that explains itself is recorded as a refusal, not as a failure.
@@ -209,6 +212,14 @@ this release fixes:
    mention it. A construct that leaves the document without a word is the defect
    worth hunting, because it looks exactly like a document that read fine.
 3. **nothing crashes or hangs** — no traceback, no timeout.
+4. **every source word is accounted for** — the source words are extracted a
+   second, deliberately dumb way (paragraphs and their text, with `text:s`,
+   `text:tab` and `text:line-break` read as the whitespace they are) and compared
+   against the words in the produced `.docx`. A word may be absent only when the
+   report names the construct that held it. Two failures are told apart, and the
+   second is the one a reader of the report would wave through: **lost without a
+   word** (nobody said anything — a silent loss) and **lost after being promised**
+   (a report line says the text was kept, and the word is not there anyway).
 
 Plus one cheap extra: a construct reported as *dropped* must not have its text in
 the produced document. A "dropped" that quietly lands is worse than silence.
@@ -216,7 +227,8 @@ the produced document. A "dropped" that quietly lands is worse than silence.
 **Measured on both arms — macOS arm64, 1.0.160 and 1.0.158:** 38 documents convert
 and validate, 1 is refused with its reason (`nasty.odt`, an external DTD entity
 the well-formedness check rejects rather than parses), **0 silent drops, 0
-crashes, 0 timeouts**. Under 0.5.0 the same corpus had **8 documents with silent
+crashes, 0 timeouts**, and **40,536 words compared, 0 lost without a word, 0 lost
+after being promised**. Under 0.5.0 the same corpus had **8 documents with silent
 drops** across five constructs: `text:bookmark-ref` (4,013 of them in one
 document), `text:user-field-get`, `text:bibliography-mark`, `draw:control` and
 `draw:object` inside a frame. 0.6.0 reports all five, reports each by its **ODF
@@ -224,6 +236,37 @@ name** rather than its bare local name (`text:note` and `draw:frame` are
 different vocabularies, and the prefix is what says which), and closes the class
 with a catch-all: an element the reader has no rule for is named, so a construct
 cannot leave a document in silence again.
+
+### What the word axis found in 0.7.0
+
+Three defects, none of which any earlier suite could see — all three were
+reported by their document, and all three are fixed here:
+
+1. **`text:list-header` was skipped without a word.** In
+   `annotation-formatting.odt` *every* paragraph sits in a list header, so the
+   whole document converted to an empty `.docx`: `get` exited 0, `validate`
+   exited 0, the summary said `emitted 0 paragraph(s)`, and 6 words were gone. A
+   list header is the list's lead-in — paragraphs that carry no marker — and
+   Word has no such slot, so they become plain paragraphs. The document now
+   converts to 3 paragraphs, 6/6 words.
+2. **A decoration report printed the wrong vocabulary.** What it dropped from a
+   header or footer was always named `text:<name>`, so a `table:table` inside a
+   footer (`fdo47267-3.odt`) came out as `text:table` — an element that exists in
+   no ODF vocabulary, and therefore a name that could never match the construct
+   it named. The real prefix is used now.
+3. **The same shape one level down.** `dc:creator` in an annotation report came
+   out as `:creator`, because the prefix was derived by cutting a namespace URI
+   that ends in `/` — cutting there yields nothing. It prints `dc:creator` now,
+   and an unknown namespace can no longer produce an empty prefix.
+
+**The axis is proved able to fail.** Silencing the reader's drop report — a
+two-line change in a scratch copy — turns the corpus **red**: exit 1, **286 words
+lost without a word across 8 documents, 38 silent drops**, each naming the word
+and the document. Reverting only the `text:list-header` fix moves
+`annotation-formatting.odt` from `6/6 ok` to `6 lost without a word`, exit 1, while
+the rest of the corpus stays green. Both breaks were then reverted to a plugin
+byte-identical to the committed one (`shasum -a 256`), because an axis that cannot
+go red proves nothing about the documents that pass it.
 
 The same numbers come from a **different platform and a different transport**: the
 CI runner has no authenticated `gh`, so `fetch.py` falls through to plain HTTPS,
@@ -284,40 +327,60 @@ python3 plugin dump report.odt > /dev/null   # stdout is the JSONL command strea
 
 - drawings that are not pictures — shapes (`draw:custom-shape`, `rect`, …),
   charts, embedded objects, and text boxes (`draw:text-box`): the text inside a
-  text box is dropped
+  text box is dropped. *Corpus:* text boxes in `ClimateChange2.odt`,
+  `PageBackground.odt`, `fdo68839.odt`, `fdo90130-1.odt`; embedded objects in
+  `fdo68839.odt` and `formula.odt`. No corpus document carries a chart.
 - **floating images**: everything is placed inline. A frame anchored to the page
-  or the paragraph keeps its size but loses its position, and the plugin says so
+  or the paragraph keeps its size but loses its position, and the plugin says so.
+  *Corpus:* `PageBackground.odt` (page-anchored), `ClimateChange2.odt`
+  (paragraph-anchored).
 - images inside a **table cell** (a cell carries text only; the surrounding text
-  of that cell survives)
+  of that cell survives). *Corpus:* `fdo47267-3.odt`.
 - image formats outside the six above — EMF and WMF in particular, which have no
-  magic bytes this reader can trust
-- fields, bookmarks and tracked changes — flattened to text, each reported
+  magic bytes this reader can trust. *No corpus document carries one*; the
+  fixture in `tests/make_fixture.py` does.
+- fields, bookmarks and tracked changes — flattened to text, each reported.
+  *Corpus:* bookmarks in `api-for-odfpy.odt` (540 start / 540 end) and
+  `empty-svg-family-name.odt`; tracked changes in `fdo47267-3.odt`.
 - **cross-references** — `text:bookmark-ref`, `text:reference-ref` and
-  `text:note-ref` keep their cached text and lose the reference; a corpus
-  document carries 4,013 of them, and each one is counted in the report
+  `text:note-ref` keep their cached text and lose the reference.
+  *Corpus:* `api-for-odfpy.odt` carries 4,013 of them, and each one is counted in
+  the report.
 - **user fields** (`text:user-field-get`), **bibliography marks**
   (`text:bibliography-mark`), **form controls** (`draw:control`) and **embedded
   objects** (`draw:object`, `draw:object-ole`, `draw:plugin`): dropped or
-  flattened to their text, reported by ODF name
+  flattened to their text, reported by ODF name. *Corpus:* `userfields.odt`,
+  `userfields_ooo3.odt`, `BibliographyEntryField.odt`, `citation.odt`,
+  `dateFormFormats.odt`, `fdo68839.odt`.
 - any element the reader has no rule for: reported by name from a catch-all, so
   nothing in the text flow leaves without a word
-- nested tables
+- nested tables. *Corpus:* `fdo37606.odt`, `fdo47267-3.odt`, `simpletable.odt`.
 - **internal anchors** — `text:a xlink:href="#name"` points at a
   `text:bookmark`, and bookmarks are not converted, so the text is kept and the
   link is dropped (with a warning). A `w:anchor` pointing at a bookmark that
   does not exist would be a link that lands nowhere, so it is not emitted
 - `text:a` with a **relative** href, which would need a relationship to a part
-  this conversion does not carry
-- page styles, page size and margins, and sections' column layout
+  this conversion does not carry. *Corpus:* `api-for-odfpy.odt`.
+- page styles, page size and margins, and sections' column layout. *Corpus:* a
+  `style:page-layout` in 38 of the 39 documents, `style:columns` in
+  `BibliographyEntryField.odt`, `Electra.odt`, `PageBackground.odt`,
+  `api-for-odfpy.odt` and `fdo53210.odt`.
 - **fields** — `text:page-number`, `text:page-count`, `text:date` and the rest.
   A field is computed by the writer, so the package holds only a cached value: a
   footer reading "Page 1 of 3" converts to exactly that text, on every page. The
-  plugin reports the flattening rather than implying the field survived
+  plugin reports the flattening rather than implying the field survived.
+  *Corpus:* `api-for-odfpy.odt`, `headerfooter.odt`, `annotation-formatting.odt`.
 - a header or footer on **any other master page** — a different first page is a
   separate master page in ODF, so the one the first block names is converted and
-  the others are reported
-- table cell formatting beyond text (bold/italic inside a cell is flattened)
-- `.fodt` (flat XML) and password-protected packages
+  the others are reported. *Corpus:* `PageBackground.odt` (1 more),
+  `fdo53210.odt` (3 more).
+- table cell formatting beyond text (bold/italic inside a cell is flattened).
+  *Corpus:* `fdo37606.odt`, `fdo47267-3.odt`, `simpletable.odt`.
+- `.fodt` (flat XML) and password-protected packages — refused before anything is
+  read, so no corpus document exercises them.
+
+Every ❌ above either names the corpus document that exhibits it or says outright
+that the corpus has none — a row whose evidence is a fixture says so.
 
 `.odt` files that are really a spreadsheet or presentation package are refused
 with exit 3 rather than converted into a wrong-shaped document.
@@ -432,7 +495,7 @@ the build: across four runs of one unchanged commit its *Linux* asset passed onc
 and failed three times, each time with an assembly load failure raised on a
 document — `Could not load file or assembly 'System.IO.Compression.ZipFile,
 Version=10.0.0.0'` on two of them and `'System.Private.Xml, Version=10.0.0.0'` on
-the 0.6.0 run — before this plugin has done anything with the output, so that
+the 0.7.0 run — before this plugin has done anything with the output, so that
 failure measures the environment rather than the reader. The 1.0.158 numbers in
 this README come from macOS arm64, where the same suites are green; the Linux
 asset's behaviour is upstream's to fix, not this plugin's.

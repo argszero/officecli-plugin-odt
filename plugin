@@ -60,7 +60,7 @@ MAX_REPEAT = 64          # guard against a table:number-columns-repeated bomb
 LIST_KINDS = {}
 MANIFEST = {
     "name": "officecli-odt",
-    "version": "0.6.0",
+    "version": "0.7.0",
     "protocol": 1,
     "kinds": ["dump-reader"],
     "extensions": [".odt"],
@@ -124,6 +124,11 @@ NS_PREFIX = {
     "urn:oasis:names:tc:opendocument:xmlns:style:1.0": "style",
     "urn:oasis:names:tc:opendocument:xmlns:table:1.0": "table",
     "urn:oasis:names:tc:opendocument:xmlns:svg-compatible:1.0": "svg",
+    "urn:oasis:names:tc:opendocument:xmlns:meta:1.0": "meta",
+    "urn:oasis:names:tc:opendocument:xmlns:datastyle:1.0": "number",
+    "urn:oasis:names:tc:opendocument:xmlns:xsl-fo-compatible:1.0": "fo",
+    "http://purl.org/dc/elements/1.1/": "dc",
+    "http://www.w3.org/1999/xlink": "xlink",
 }
 
 
@@ -138,7 +143,13 @@ def named(elem):
     if not isinstance(tag, str) or not tag.startswith("{"):
         return local(elem)
     uri, name = tag[1:].split("}", 1)
-    return "%s:%s" % (NS_PREFIX.get(uri, uri.rsplit("/", 1)[-1]), name)
+    prefix = NS_PREFIX.get(uri)
+    if prefix is None:
+        # Deriving a prefix by cutting the namespace URI is how this once printed
+        # ':creator' for dc:creator: the URI ends in '/', so the cut was empty and
+        # the report named a construct that exists in no vocabulary. Never empty.
+        prefix = uri.rstrip("/:#").rsplit("/", 1)[-1].rsplit(":", 1)[-1] or "unknown"
+    return "%s:%s" % (prefix, name)
 
 
 # ---------------------------------------------------------------------------
@@ -771,7 +782,10 @@ def decoration_text(elem, styles, skipped, zf):
     paras, aligns = [], []
     for kid in elem:
         if local(kid) != "p":
-            skipped.note("text:%s inside a header/footer (dropped)" % local(kid))
+            # The prefix is the element's own, not a guess: a table in a
+            # header is table:table, and stamping "text:" on it names a
+            # construct that does not exist — which is a name nobody can find.
+            skipped.note("%s inside a header/footer (dropped)" % named(kid))
             continue
         base = style_props(styles, "paragraph", kid.get(q("text", "style-name")))
         items = inline_items(kid, styles, base, skipped, zf)
@@ -948,7 +962,19 @@ def walk_block(elem, em, styles, skipped, zf, list_kind=None, level=0):
             else:
                 skipped.note("text:list without text:style-name (assumed bullet)")
         for item in elem:
+            if local(item) == "list-header":
+                # A list header is the list's lead-in: paragraphs that carry no
+                # marker. Word's list model has no such slot, so they become
+                # plain paragraphs. Skipping them is what made a LibreOffice
+                # document whose every paragraph sat in a list header convert to
+                # an empty file, with rc 0 and nothing said about why.
+                for kid in item:
+                    walk_block(kid, em, styles, skipped, zf)
+                continue
             if local(item) != "list-item":
+                # Neither an item nor a header: named, so it cannot leave the
+                # document without a word.
+                skipped.note("%s inside a text:list (dropped)" % named(item))
                 continue
             for kid in item:
                 # A list *inside* a list item is the next level down. The level
