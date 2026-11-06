@@ -4,19 +4,28 @@
 Every fixture under `tests/` was written by the same hand as the reader. This
 suite runs it over documents produced by OpenOffice.org, OpenOffice, NeoOffice,
 LibreOffice and pandoc — the files `tests/corpus/sources.json` names — and judges
-each one on four things:
+each one on five things:
 
   1. it converts, and the produced .docx validates (a clean refusal is recorded
      as a refusal, with its reason);
   2. every construct the reader does not convert is **named in its own report** —
      a construct that vanishes silently is one defect this suite exists to catch;
-  3. **no word is lost in silence** — the second, and the reason this suite grew
-     a fourth axis: a document can convert, validate, report every construct it
-     skipped, and still swallow a sentence. Words are compared between an
-     independent extraction of the source and the produced document; a missing
-     word passes only when the reader named the construct that held it as
-     dropped. A word the reader *promised* to keep and then lost fails too.
-  4. nothing crashes or hangs.
+  3. **no word is lost in silence** — the reason this suite grew a word axis:
+     a document can convert, validate, report every construct it skipped, and
+     still swallow a sentence. Words are compared between an independent
+     extraction of the source and the produced document; a missing word passes
+     only when the reader named the construct that held it as dropped. A word
+     the reader *promised* to keep and then lost fails too.
+  4. **no block is lost in silence** — the axis word fidelity cannot supply: a table flattened into loose paragraphs, a nesting level
+     collapsed and two paragraphs merged all score 100% on words. The source's
+     block sequence (paragraph / heading with its level / list item with its
+     depth / table with its row-by-column grid / image and the paragraph holding
+     it) is read independently and compared **block by block, in order**,
+     against the reader's own command stream. A structural difference passes only
+     when the report names the construct that caused it. Totals are never
+     compared: two documents with the same number of blocks in a different order
+     are not the same document.
+  5. nothing crashes or hangs.
 
 Plus one cheap extra: a construct reported as dropped must not have its text in
 the produced document.
@@ -24,7 +33,7 @@ the produced document.
     python3 tests/corpus/fetch.py                    # once
     OFFICECLI_BIN=/path/to/officecli python3 tests/corpus.py [--verbose]
 
-Exit status is 1 when any document fails one of the four, so CI can gate on it.
+Exit status is 1 when any document fails one of them, so CI can gate on it.
 """
 import argparse
 import collections
@@ -362,6 +371,379 @@ def word_losses(src, origin, out, dropped, kept):
     return silent, false_claims, compared
 
 
+# ---------------------------------------------------------------------------
+# axis 5: block structure
+# ---------------------------------------------------------------------------
+# Three pools, because a report says one of three different things about a
+# construct: it is gone with everything inside it, only its *text* is gone, or it
+# survives in a shallower shape. Collapsing them excuses a picture on a line that
+# only ever promised to drop text — on this corpus that one collapse turned four
+# correct conversions into eleven reported differences, so the pools are kept
+# apart rather than tidied into one.
+REMOVED_HINT = ("dropped", "not a package part", "missing from the package")
+TEXT_ONLY_HINT = ("its text is dropped",)
+RECONVERTED_HINT = ("not converted",)
+
+PARA_BLOCKS = ("p", "h", "li")
+
+
+DROPPED_COUNT = re.compile(r"skipped (\d+) x ")
+
+
+def report_structure(err):
+    """(whole, text_gone, kept, drops) — names, by what the report says became of them.
+
+    whole: the construct and everything in it reached nothing.
+    text_gone: its text is gone, so the block it formed reached nothing either —
+      but a picture it merely *held* is not excused by this line, which is why
+      this pool is kept apart from the first.
+    kept: not converted, its text is kept — the block reaches the output in
+      another shape, so it consumes an output block without a kind to compare.
+
+    drops carries the count the report itself declared per dropped construct. A
+    name cannot say *which* of a hundred pictures went, so a census that excused
+    on the name would excuse every picture in the document the moment one of them
+    was named — the same always-fires mistake, reached from the other side.
+    """
+    whole, text_gone, kept, drops = set(), set(), set(), {}
+    for line in err.splitlines():
+        if not line.strip().startswith("[warning]"):
+            continue
+        names = set(REPORTED.findall(line))
+        if not names:
+            continue
+        low = line.lower()
+        if any(h in low for h in RECONVERTED_HINT):
+            kept |= names
+        elif any(h in low for h in TEXT_ONLY_HINT):
+            text_gone |= names
+        elif any(h in low for h in REMOVED_HINT):
+            whole |= names
+            m = DROPPED_COUNT.search(line)
+            n = int(m.group(1)) if m else 1
+            for name in names:
+                drops[name] = drops.get(name, 0) + n
+    return whole, text_gone, kept, drops
+
+
+def _runs_text(el, skip_draw):
+    """The element's text, with text:s/tab/line-break spelled as they render."""
+    acc = []
+    if el.text:
+        acc.append(el.text)
+
+    def tail(kid):
+        # Whatever followed a skipped element is still its parent's own text: a
+        # caption sits as often after the frame that illustrates it as before.
+        if kid.tail:
+            acc.append(kid.tail)
+
+    def walk(node):
+        for kid in node:
+            n = local(kid.tag)
+            if skip_draw and (prefixed(kid.tag).startswith("draw:")
+                              or n in ("table", "note")):
+                tail(kid)
+                continue
+            if n in WHITESPACE:
+                times = 1
+                if n == "s":
+                    try:
+                        times = int(kid.get(q("text", "c")) or 1)
+                    except (TypeError, ValueError):
+                        times = 1
+                acc.append(WHITESPACE[n] * max(1, min(times, 64)))
+                tail(kid)
+                continue
+            if kid.text:
+                acc.append(kid.text)
+            walk(kid)
+            if kid.tail:
+                acc.append(kid.tail)
+
+    walk(el)
+    return " ".join("".join(acc).split())
+
+
+def plain_text(el):
+    """Everything the element says, as a reader sees it."""
+    return _runs_text(el, False)
+
+
+def own_text(el):
+    """A paragraph's own text: its runs, not what the frames it carries hold.
+
+    A text box inside a paragraph is a construct of its own, which the report
+    names; the text inside it is not the paragraph's text, and counting it here
+    would make a paragraph look kept while the reader had dropped its box.
+    """
+    return _runs_text(el, True)
+
+
+def _pictures(el, anc):
+    """[(own, ancestry)] for every picture in a subtree, notes aside."""
+    out = []
+
+    def walk(node, a):
+        n = local(node.tag)
+        if n in NOTES_ASIDE:
+            return
+        a2 = a + (prefixed(node.tag),)
+        if n == "image":
+            out.append((a2[-1], a))
+            return
+        for kid in node:
+            walk(kid, a2)
+
+    walk(el, anc)
+    return out
+
+
+def _table_grid(el):
+    """(rows, columns) for the table's own grid, row groups transparent."""
+    rows = []
+
+    def rows_of(node):
+        for kid in node:
+            n = local(kid.tag)
+            if n == "table-row":
+                rows.append(kid)
+            elif n in ("table-header-rows", "table-row-group"):
+                rows_of(kid)
+
+    rows_of(el)
+    width = 0
+    for r in rows:
+        w = 0
+        for c in r:
+            if local(c.tag) in ("table-cell", "covered-table-cell"):
+                try:
+                    span = int(c.get(q("table", "number-columns-spanned")) or 1)
+                except (TypeError, ValueError):
+                    span = 1
+                w += max(1, span)
+        width = max(width, w)
+    return len(rows), width
+
+
+def source_blocks(root, styles):
+    """(body, pictures, decorations) — the source's own account of its structure.
+
+    body is the block sequence: paragraph, heading with its level, list item with
+    its depth, table with its grid. A paragraph holding nothing but the pictures
+    anchored to it is not a block on either side — the picture is, and counting
+    the carrier would report a block the file never had.
+
+    pictures is a census rather than a sequence, because extraction and anchoring
+    legitimately disagree about *where* a picture lands: the reader places a
+    paragraph-anchored frame inline, so its position in the output is not the
+    position of its element in the source. Whether it arrived is still a fact.
+
+    decorations are the header and footer parts that carry text, which live in
+    the page layouts of styles.xml and nowhere near a text flow.
+    """
+    body, decos = [], []
+
+    def block(kind, detail, anc, own):
+        return dict(kind=kind, detail=detail, anc=anc, own=own)
+
+    def walk(el, anc, depth):
+        n = local(el.tag)
+        a2 = anc + (prefixed(el.tag),)
+        if n in NOTES_ASIDE:
+            return
+        if n in ("h", "p"):
+            if n == "h":
+                try:
+                    lvl = int(el.get(q("text", "outline-level")) or 1)
+                except (TypeError, ValueError):
+                    lvl = 1
+                body.append(block("h", max(1, min(6, lvl)), anc, prefixed(el.tag)))
+                return
+            if _pictures(el, anc) and not own_text(el):
+                return                      # a carrier: the picture is the block
+            body.append(block("li" if depth else "p",
+                              depth - 1 if depth else None, anc, prefixed(el.tag)))
+            return
+        if n in ("frame", "image", "g"):
+            for kid in el:
+                walk(kid, a2, depth)
+            return
+        if n == "list":
+            for kid in el:
+                k = local(kid.tag)
+                if k == "list-header":
+                    for k2 in kid:
+                        walk(k2, a2, depth)
+                elif k == "list-item":
+                    for k2 in kid:
+                        if local(k2.tag) == "list":
+                            walk(k2, a2, depth + 1)
+                        else:
+                            walk(k2, a2, depth + 1 if depth else 1)
+                else:
+                    walk(kid, a2, depth)
+            return
+        if n == "table":
+            rows, cols = _table_grid(el)
+            body.append(block("table", "%dx%d" % (rows, cols), anc, prefixed(el.tag)))
+            return
+        for kid in el:
+            walk(kid, a2, depth)
+
+    pictures = []
+    if root is not None:
+        for flow in text_flows(root)[:1]:
+            for kid in flow:
+                walk(kid, (), 0)
+            pictures = _pictures(flow, ())
+    return body, pictures, decos
+
+
+def _para_kind(pr):
+    """(kind, detail) for a paragraph command: heading level, list depth, plain."""
+    if pr.get("liststyle"):
+        try:
+            return "li", int(pr.get("level") or 0)
+        except (TypeError, ValueError):
+            return "li", 0
+    style = str(pr.get("style", ""))
+    if style.startswith("Heading"):
+        try:
+            return "h", int(style[len("Heading"):] or 1)
+        except ValueError:
+            return "h", 1
+    return "p", None
+
+
+def stream_blocks(dumped):
+    """(body, pictures, decorations) read from the reader's own command stream.
+
+    The stream is the artifact's product, so this side is what the reader asked
+    officecli to build — not what a re-reading of the package claims it built.
+    """
+    seq, decos = [], []
+    pictures = 0
+    last = None
+    for line in dumped.splitlines():
+        line = line.strip()
+        if not line:
+            continue
+        try:
+            o = json.loads(line)
+        except ValueError:
+            continue
+        if o.get("command") != "add":
+            continue
+        t = o.get("type")
+        pr = o.get("props") or {}
+        if t == "paragraph":
+            if (o.get("parent") or "") not in ("/body", "/"):
+                last = None
+                continue                    # a table cell's or a part's paragraph
+            rec = [_para_kind(pr)[0], _para_kind(pr)[1], 0, 0]
+            seq.append(("para", rec))
+            last = rec
+        elif t == "run":
+            if last is not None and (pr.get("text") or "").strip():
+                last[2] += 1
+        elif t == "picture":
+            pictures += 1
+            if last is not None:
+                last[3] += 1
+        elif t == "table":
+            seq.append(("table", "%sx%s" % (pr.get("rows"), pr.get("cols"))))
+            last = None
+
+    body = []
+    for tag, val in seq:
+        if tag == "table":
+            body.append(("table", val))
+            continue
+        kind, detail, runs, pics = val
+        if pics and not runs:
+            continue                        # a carrier: the picture is the block
+        body.append((kind, detail))
+    return body, pictures, decos
+
+
+def _hit(b, pool):
+    """Whether one of the block's *containers* is one of these report names.
+
+    A block's own element never counts. text:p is an ancestor of every paragraph,
+    draw:image is the element of every picture, and table:table of every table: a
+    single report line naming one of them would excuse its whole class, and an
+    excuse that always fires proves nothing. What the report says about a whole
+    class is a count, and the census reads it as one.
+    """
+    return set(b["anc"]) & pool
+
+
+def block_losses(src, out, whole, text_gone, kept):
+    """(silent, excused, compared) — the body sequence, block by block and in order.
+
+    A construct the report dropped contributes no output block, so it leaves the
+    expected sequence rather than shifting it; one the report says was *not
+    converted* but kept its text does reach the output in another shape, so it
+    stays and consumes one output block with no kind to compare. Totals are never
+    compared: two documents with the same number of blocks in a different order
+    are not the same document.
+    """
+    expected, excused = [], 0
+    for b in src:
+        if _hit(b, whole) or _hit(b, text_gone):
+            excused += 1
+            continue
+        expected.append((b["kind"], b["detail"], bool(_hit(b, kept)), b))
+
+    silent = []
+    i = j = 0
+    while i < len(expected) and j < len(out):
+        kind, detail, loose, b = expected[i]
+        if (kind, detail) == out[j] or loose:
+            i += 1
+            j += 1
+            continue
+        if _hit(b, kept):
+            excused += 1
+        else:
+            silent.append((i, (kind, detail), out[j], b))
+        i += 1
+        j += 1
+    while i < len(expected):
+        kind, detail, loose, b = expected[i]
+        if loose:
+            excused += 1
+        else:
+            silent.append((i, (kind, detail), None, b))
+        i += 1
+    while j < len(out):
+        silent.append((j, None, out[j], None))
+        j += 1
+    return silent, excused, max(len(expected), len(out))
+
+
+def picture_losses(src, out, whole, drops):
+    """(silent, excused, compared) — did each picture arrive, not where it landed.
+
+    A picture inside a construct the report dropped needs no allowance. The rest
+    are covered by the number the report declared for draw:image: the name cannot
+    say which of them went, and the count can.
+    """
+    kept = [p for p in src if not _hit(dict(kind="img", anc=p[1], own=p[0]), whole)]
+    gone_with_container = len(src) - len(kept)
+    unread = len(kept) - out
+    allowance = drops.get("draw:image", 0)
+    if unread <= 0:
+        if unread < 0:
+            return [(0, ("img", len(kept)), ("img", out), None)], gone_with_container, len(src)
+        return [], gone_with_container, len(src)
+    if unread <= allowance:
+        return [], gone_with_container + unread, len(src)
+    return ([(0, ("img", out + allowance), ("img", out), None)],
+            gone_with_container + allowance, len(src))
+
+
 def silent_drops(root, reported):
     """{name: count} for flow elements neither converted nor reported."""
     bad = {}
@@ -450,6 +832,24 @@ def measure(path):
             words_src, words_out = sum(s_words.values()), sum(o_words.values())
             word_silent, word_false, compared = word_losses(
                 s_words, s_origin, o_words, dropped, kept)
+        struct_silent, struct_excused, blocks_cmp, pics_cmp = [], 0, 0, 0
+        # Not `and dumped`: a document whose every block the report dropped
+        # emits an empty command stream, and guarding on it would skip the
+        # structure check for exactly the conversion that kept nothing — the
+        # failure this axis exists to catch.
+        if produced:
+            whole, text_gone, kept, drops = report_structure(err)
+            s_body, s_pics, s_deco = source_blocks(root, styles)
+            o_body, o_pics, o_deco = stream_blocks(dumped)
+            lost, excused, cmp_body = block_losses(
+                s_body, o_body, whole, text_gone, kept)
+            struct_silent += lost
+            struct_excused += excused
+            lost, excused, cmp_pics = picture_losses(s_pics, o_pics, whole, drops)
+            struct_silent += lost
+            struct_excused += excused
+            blocks_cmp = cmp_body + cmp_pics
+            pics_cmp = cmp_pics
     finally:
         shutil.rmtree(work, ignore_errors=True)
 
@@ -461,6 +861,8 @@ def measure(path):
                 timeout=to_dump or to_get, silent=silent, leaks=leaks,
                 words_src=words_src, words_out=words_out, compared=compared,
                 word_silent=word_silent, word_false=word_false,
+                struct_silent=struct_silent, struct_excused=struct_excused,
+                blocks=blocks_cmp, pics=pics_cmp,
                 warns=[l for l in err.strip().splitlines() if l.strip()], get_err=get_err)
 
 
@@ -470,6 +872,13 @@ def _sample(d, limit=6):
                                     ("" if not isinstance(v, tuple) else "/" + ",".join(v[1])))
                       for w, v in items[:limit])
     return shown + ("" if len(items) <= limit else ", +%d more" % (len(items) - limit))
+
+
+def _struct_sample(items, limit=4):
+    shown = []
+    for i, want, got, b in items[:limit]:
+        shown.append("#%d %s -> %s" % (i, want, got))
+    return ", ".join(shown) + ("" if len(items) <= limit else ", +%d more" % (len(items) - limit))
 
 
 def verdict(r):
@@ -488,6 +897,9 @@ def verdict(r):
     if r["word_false"]:
         flags.append("FALSE-CLAIM %d (%s)" % (sum(v[0] for v in r["word_false"].values()),
                                               _sample(r["word_false"])))
+    if r["struct_silent"]:
+        flags.append("STRUCT %d (%s)" % (len(r["struct_silent"]),
+                                         _struct_sample(r["struct_silent"])))
     if r["leaks"]:
         flags.append("LEAK " + ", ".join(sorted(r["leaks"])))
     converted = r["rc_get"] == 0 and r["rc_val"] == 0
@@ -550,10 +962,19 @@ def main(argv=None):
              converted, refused,
              sum(1 for r in rows if r["silent"]), sum(1 for r in rows if r["crash"]),
              sum(1 for r in rows if r["timeout"])))
+    blocks = sum(r["blocks"] for r in rows)
+    pics = sum(r["pics"] for r in rows)
+    silent_blocks = sum(len(r["struct_silent"]) for r in rows)
+    excused_blocks = sum(r["struct_excused"] for r in rows)
     print("%d words compared | %d lost without a word (%d document(s)) | "
           "%d lost after being promised (%d document(s))"
           % (compared, lost, sum(1 for r in rows if r["word_silent"]),
              false, sum(1 for r in rows if r["word_false"])))
+    print("%d body block(s) compared | %d lost without a name (%d document(s)) | "
+          "%d explained by the report | %d picture(s) accounted for"
+          % (blocks, silent_blocks, sum(1 for r in rows if r["struct_silent"]),
+             excused_blocks,
+             pics))
     if failures:
         print("\n%d document(s) failed" % failures)
     return 1 if failures else 0

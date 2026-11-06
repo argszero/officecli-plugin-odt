@@ -60,7 +60,7 @@ MAX_REPEAT = 64          # guard against a table:number-columns-repeated bomb
 LIST_KINDS = {}
 MANIFEST = {
     "name": "officecli-odt",
-    "version": "0.7.0",
+    "version": "0.8.0",
     "protocol": 1,
     "kinds": ["dump-reader"],
     "extensions": [".odt"],
@@ -355,14 +355,18 @@ def image_items(images, width, height, zf, skipped, alt_hint=None):
             skipped.note("draw:image with an external href (not a package part)")
             continue
         part = urllib.parse.unquote(href)
+        while part.startswith("./"):
+            part = part[2:]           # ODF writes interior targets relative to /
         try:
             data = zf.read(part)
         except KeyError:
-            skipped.note("image part '%s' missing from the package" % part)
+            skipped.note("draw:image '%s' missing from the package" % part)
             continue
         sniffed = sniff_image(data)
         if sniffed is None:
-            skipped.note("image '%s' is not png/jpeg/gif/bmp/tiff/svg"
+            # Name the construct, not just the file: a report a caller cannot
+            # tie back to an element in the source is a report it cannot act on.
+            skipped.note("draw:image '%s' dropped: not png/jpeg/gif/bmp/tiff/svg"
                          % part.rsplit("/", 1)[-1])
             continue
         mime, _ext = sniffed

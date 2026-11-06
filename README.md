@@ -13,14 +13,18 @@ answer to "will my document survive the conversion".
 §2.1/§5.1: a one-shot process that streams officecli batch commands as JSONL on
 stdout, which main replays into a fresh native file.
 
-**Version 0.7.0.** Verified against **officecli 1.0.160** (upstream `main` at
+**Version 0.8.0.** Verified against **officecli 1.0.160** (upstream `main` at
 [`c56512c8`](https://github.com/iOfficeAI/OfficeCLI/commit/c56512c8)) and against
 **1.0.158** ([`5e3e2627`](https://github.com/iOfficeAI/OfficeCLI/commit/5e3e2627)),
 with **51 checks**, **8 cells / 118 assertions** and a **39-document foreign
 corpus** green on both, on macOS arm64 with Python 3.13. On that corpus the
-conversion is measured **word by word**: **40,536 source words** compared against
-the produced `.docx`, **0 lost without a word, 0 lost after being promised**. The
-same three suites also run in CI on Linux against the released binaries — see
+conversion is measured **word by word** — **40,536 source words** compared
+against the produced `.docx`, **0 lost without a word, 0 lost after being
+promised** — and **block by block**: **4,536 body blocks** (paragraph, heading
+with its level, list item with its depth, table with its grid) matched in order,
+plus **20 pictures** as a census, **0 lost without a name, 47 explained by the
+report**. The same three
+suites also run in CI on Linux against the released binaries — see
 [Tests in CI](#tests-in-ci). The suites need a binary; no other build tooling is
 involved.
 
@@ -42,9 +46,9 @@ discovery paths in protocol §3 — the first match wins:
 | 3 | `<dir of the officecli binary>/plugins/dump-reader/odt/plugin` | ✅ works, listed by `officecli plugins list` |
 | 4 | an executable `officecli-dump-reader-odt` or `officecli-odt` on `PATH` | not tested |
 
-**Measured (0.7.0):** path 2 works end to end — a clean
+**Measured (0.8.0):** path 2 works end to end — a clean
 `HOME=<dir>` with `plugin` at `~/.officecli/plugins/dump-reader/odt/plugin` is
-listed by `officecli plugins list` (name `officecli-odt`, version `0.7.0`) and a
+listed by `officecli plugins list` (name `officecli-odt`, version `0.8.0`) and a
 `.odt` converts through it with no environment variable set, producing a
 sibling `.docx` that validates. That is the path the release notes use.
 
@@ -143,8 +147,9 @@ All of it was measured on **macOS arm64, officecli 1.0.160 and 1.0.158**; the
 same suites also run in CI on Linux against the same released binaries
 ([Tests in CI](#tests-in-ci)).
 
-| construct | 0.7.0 | asserted by | notes |
+| construct | 0.8.0 | asserted by | notes |
 |---|---|---|---|
+| **block structure** — every source block is still a block | ✅ **new in 0.8.0** | `tests/corpus.py` axis 5, 4,536 blocks + 20 pictures | paragraph, heading + level, list item + depth, table + grid and picture matched **in order**; a block may go or change shape only when the report names the construct that held it |
 | **word fidelity** — every source word accounted for | ✅ **new in 0.7.0** | `tests/corpus.py` axis 4, 40,536 words | a word may be absent only when the report names the construct that held it; a report that promises the text is held to that promise |
 | paragraphs and text | ✅ | `verify.py`, every cell | each paragraph's text appears exactly once |
 | bold / italic / underline | ✅ | `verify.py` | `fo:font-weight`, `fo:font-style`, `style:text-underline-style` |
@@ -203,7 +208,7 @@ python3 tests/corpus/fetch.py                             # once, and after a ma
 OFFICECLI_BIN=/path/to/officecli python3 tests/corpus.py
 ```
 
-Each document is judged on four things, and the last two are what found the
+Each document is judged on five things, and the last three are what found the
 defects this release fixes:
 
 1. **it converts** — `get <doc> /body` exits 0 and the produced `.docx` validates.
@@ -220,6 +225,14 @@ defects this release fixes:
    second is the one a reader of the report would wave through: **lost without a
    word** (nobody said anything — a silent loss) and **lost after being promised**
    (a report line says the text was kept, and the word is not there anyway).
+5. **every block keeps its shape** — the source block sequence is read from
+   `content.xml` and compared **in order** against the blocks the reader asked
+   officecli to build, so a paragraph, a heading's level, a list item's depth, a
+   table's grid and a picture each have to arrive. Absence or reshaping is
+   allowed only when the report names the construct that held it; a construct
+   reported as *not converted, its text is kept* consumes one output block
+   instead of vanishing, which is what a list flattened into plain paragraphs
+   looks like from the outside.
 
 Plus one cheap extra: a construct reported as *dropped* must not have its text in
 the produced document. A "dropped" that quietly lands is worse than silence.
@@ -227,8 +240,14 @@ the produced document. A "dropped" that quietly lands is worse than silence.
 **Measured on both arms — macOS arm64, 1.0.160 and 1.0.158:** 38 documents convert
 and validate, 1 is refused with its reason (`nasty.odt`, an external DTD entity
 the well-formedness check rejects rather than parses), **0 silent drops, 0
-crashes, 0 timeouts**, and **40,536 words compared, 0 lost without a word, 0 lost
-after being promised**. Under 0.5.0 the same corpus had **8 documents with silent
+crashes, 0 timeouts**, **40,536 words compared, 0 lost without a word, 0 lost
+after being promised**, and **4,556 blocks compared, 0 lost without a name** —
+4,536 body blocks in order, and the corpus's **20 pictures** as a census — with
+47 differences explained by the report. Every one of those 20 pictures is
+accounted for: 17 arrive as pictures, and 3 are dropped under the name of their
+construct and the count the report declares (`fdo68839.odt` and `formula.odt`
+each carry an `Object 1` **VCL metafile**; `textWithImages.odt`'s picture has an
+external href, so it is not a package part at all). Under 0.5.0 the same corpus had **8 documents with silent
 drops** across five constructs: `text:bookmark-ref` (4,013 of them in one
 document), `text:user-field-get`, `text:bibliography-mark`, `draw:control` and
 `draw:object` inside a frame. 0.6.0 reports all five, reports each by its **ODF
@@ -274,6 +293,65 @@ and there it reports `0 kept, 39 fetched, 0 failed` — every byte matching the
 manifest's sha256 — before the suite prints the same 39-document verdict on
 Linux with 1.0.160. The development machine cannot reach `raw.githubusercontent.com`
 at all, so that half of the fetcher is the runner's measurement, not a local one.
+
+### What the block axis found in 0.8.0
+
+Word fidelity cannot see structure. Two documents can hold exactly the same words
+in the same order and be different documents: one table, or forty paragraphs. This
+release adds the axis that reads structure on both sides — the source's block
+sequence out of `content.xml`, the reader's out of the commands it emitted — and
+compares them **in order**. On the corpus: **4,536 body blocks and 20 pictures
+compared, 0 lost without a name, 47 explained by the report.**
+
+**Two defects, one in the reader and one in the axis itself:**
+
+1. **An image part was reported missing while it was in the package.**
+   `fdo68839.odt` and `formula.odt` write their `xlink:href` as
+   `./ObjectReplacements/Object 1`. The reader used the href as a zip name without
+   dropping the `./` prefix, so `zf.read` raised `KeyError` and the report said
+   *"image part missing from the package"* — the construct named, the reason
+   false. The prefix is stripped now, and what the reader refuses it refuses for
+   its real reason: the part is a **`VCLMTF`** metafile, an unsupported format. The
+   two image report lines also name their construct (`draw:image …`) instead of a
+   bare file name, which is what lets the census excuse them by the count the
+   report declares rather than by a name no reader could tie to an element.
+2. **The axis skipped exactly the conversion it exists to catch.** `formula.odt`'s
+   body is a single framed object, so the reader emits an empty command stream,
+   and the structural comparison was guarded on that stream being non-empty — the
+   one document that kept nothing was the one the axis never looked at. It now
+   runs on every document that produced a file, so an empty stream is compared as
+   an empty sequence, and `formula.odt`'s single picture is counted and excused by
+   the count the report declares.
+
+**The boundary: decorations are not this axis.** A source header or footer is
+declared once per `style:page-layout`, and one layout can serve several master
+pages, while docx has one part per section — comparing decoration text per
+page-layout against one output part is a **model mismatch**, not a defect. Header
+and footer text is the **word axis's** territory, where `styles.xml` is read
+independently and every header word is accounted for.
+
+**The axis is proved able to fail, three times.** Each break was confirmed red
+against the code in this release, then reverted to a plugin byte-identical to the
+committed one (`shasum -a 256`):
+
+| break | words | blocks |
+|---|---|---|
+| every second paragraph merged into the one before it | **3,787 lost without a word** in 13 documents, 404 after being promised | **2,731 lost without a name** in 15 documents, exit 1 |
+| a list item's `level` never emitted, so nesting collapses | **40,536 / 0 / 0 — unchanged** | **20 lost without a name** in 3 documents, exit 1 |
+| a table's cells emitted as ordinary paragraphs, no `add --type table` | **40,536 / 0 / 0 — unchanged** | **8 lost without a name** in 2 documents, exit 1 |
+
+The last two rows are this release's whole argument. The document those two breaks
+produce is structurally wrong and the word axis cannot tell: every word is there,
+in order, accounted for. Only the block axis says the nesting and the grid are
+gone.
+
+**An excuse is scoped to the block's own construct, never to a universal
+ancestor.** `text:p` is an ancestor of every block in the corpus, so a report line
+naming a dropped `text:p` would excuse an entire document if ancestry alone were
+enough: the axis refuses a block's own element as its excuse and reads only its
+containers. It also excuses a class by the **count the report declares**, not by
+the name, because one line naming `draw:image` must not excuse every picture in
+the file.
 
 ## Images
 
