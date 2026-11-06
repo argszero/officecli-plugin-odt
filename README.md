@@ -557,7 +557,10 @@ That last job exists because the machine this plugin was developed on cannot
 reach `github.com` with `curl` (the connection times out), so the release-asset
 line was the one thing the README could not measure locally. The runner measures
 it, and the job fails if the asset is not byte-identical to the tree it was built
-from (`cmp plugin …`) or if the converted output does not validate.
+from (`cmp plugin …`) or if the converted output does not validate. On the 0.8.0
+tag run it printed `release tag: v0.8.0`, `officecli plugins list` reported
+`officecli-odt 0.8.0`, and the note fixture converted through the installed asset
+with no environment variable set.
 
 The workflow installs the **.NET 10 runtime** explicitly, because the released
 officecli assets are framework-dependent single files (`Microsoft.NETCore.App`
@@ -569,16 +572,22 @@ one green on both arms and one red on 1.0.158 alone. A `--version` answer is not
 evidence that a binary can open a document.
 
 **One arm is non-gating.** The `1.0.158` job stays in the matrix but does not fail
-the build: across four runs of one unchanged commit its *Linux* asset passed once
-and failed three times, each time with an assembly load failure raised on a
-document — `Could not load file or assembly 'System.IO.Compression.ZipFile,
-Version=10.0.0.0'` on two of them and `'System.Private.Xml, Version=10.0.0.0'` on
+the build: across six runs of unchanged commits its *Linux* asset has passed
+twice and failed four times, each failure an assembly load raised on a document —
+`Could not load file or assembly 'System.IO.Compression.ZipFile,
+Version=10.0.0.0'` on three of them and `'System.Private.Xml, Version=10.0.0.0'` on
 the 0.6.0 run — before this plugin has done anything with the output, so that
 failure measures the environment rather than the reader. The 1.0.158 numbers in
 this README come from macOS arm64, where the same suites are green; the Linux
-asset's behaviour is upstream's to fix, not this plugin's. Both arms were green
-on Linux in the 0.7.0 run — including the foreign corpus at 40,536 words, 0 lost
-without a word — so the failure is the runner's, not a standing condition.
+asset's behaviour is upstream's to fix, not this plugin's.
+
+The 0.8.0 release measured that flakiness in a single cycle rather than
+attributing it: the same commit `a7c0c42` was run twice, once from the `v0.8.0`
+tag and once from a push to `main`, and the 1.0.158 arm **passed on the tag run
+and failed on the `main` run**, with `System.IO.Compression.ZipFile` raised on the
+first conversion. Both runs are the same tree; only the runner differed. The tag
+run's other arm and every macOS run were green, including the foreign corpus at
+40,536 words and 4,536 body blocks with nothing lost.
 
 ## Three upstream observations made while building this
 
