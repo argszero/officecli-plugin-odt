@@ -495,10 +495,12 @@ the build: across four runs of one unchanged commit its *Linux* asset passed onc
 and failed three times, each time with an assembly load failure raised on a
 document — `Could not load file or assembly 'System.IO.Compression.ZipFile,
 Version=10.0.0.0'` on two of them and `'System.Private.Xml, Version=10.0.0.0'` on
-the 0.7.0 run — before this plugin has done anything with the output, so that
+the 0.6.0 run — before this plugin has done anything with the output, so that
 failure measures the environment rather than the reader. The 1.0.158 numbers in
 this README come from macOS arm64, where the same suites are green; the Linux
-asset's behaviour is upstream's to fix, not this plugin's.
+asset's behaviour is upstream's to fix, not this plugin's. Both arms were green
+on Linux in the 0.7.0 run — including the foreign corpus at 40,536 words, 0 lost
+without a word — so the failure is the runner's, not a standing condition.
 
 ## Three upstream observations made while building this
 
