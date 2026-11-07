@@ -150,6 +150,7 @@ same suites also run in CI on Linux against the same released binaries
 | construct | 0.8.0 | asserted by | notes |
 |---|---|---|---|
 | **block structure** — every source block is still a block | ✅ **new in 0.8.0** | `tests/corpus.py` axis 5, 4,536 blocks + 20 pictures | paragraph, heading + level, list item + depth, table + grid and picture matched **in order**; a block may go or change shape only when the report names the construct that held it |
+| **foreign arbiter** — an implementation that is not ours agrees on the block sequence | ✅ **new after 0.8.0** | `tests/foreign_axis.py`, 38 documents / 4,386 blocks | source read with **odfpy**, output read with **python-docx**: with neither end in this repository's code, a block the reader drops cannot disappear from both sides at once. 1 clean refusal (`nasty.odt`, not well-formed XML). Not gating yet — see [the section below](#a-foreign-arbiter-on-the-output) |
 | **word fidelity** — every source word accounted for | ✅ **new in 0.7.0** | `tests/corpus.py` axis 4, 40,536 words | a word may be absent only when the report names the construct that held it; a report that promises the text is held to that promise |
 | paragraphs and text | ✅ | `verify.py`, every cell | each paragraph's text appears exactly once |
 | bold / italic / underline | ✅ | `verify.py` | `fo:font-weight`, `fo:font-style`, `style:text-underline-style` |
@@ -293,6 +294,67 @@ and there it reports `0 kept, 39 fetched, 0 failed` — every byte matching the
 manifest's sha256 — before the suite prints the same 39-document verdict on
 Linux with 1.0.160. The development machine cannot reach `raw.githubusercontent.com`
 at all, so that half of the fetcher is the runner's measurement, not a local one.
+
+### A foreign arbiter on the output
+
+Every axis above judges the conversion with the same hand that writes it:
+`corpus.py` reads the package with code from this repository's own family, and
+`officecli validate` is the host's checker. A block the reader drops is then
+dropped on both sides of the comparison, and the axis stays green while the output
+is short.
+
+`tests/foreign_axis.py` puts implementations that are **not ours on either end** —
+**odfpy 1.4.1** reading the source `.odt`, **python-docx 1.2.0** reading the
+produced `.docx` — and compares the block sequence in order: paragraph, heading
+with its level, list item with its depth, table. Where the host ships Apple's
+Office.mdimporter, `mdimport` adds a second, unrelated opinion on whether the
+package imports at all; where it does not, the check says so and holds nothing
+against the package.
+
+Measured on the 39-document corpus, macOS arm64, officecli 1.0.160:
+**38 documents agree over 4,386 text blocks, and 1 is the corpus's own clean
+refusal** (`nasty.odt` — `content.xml` is not well-formed XML, which the reader
+reports in those words).
+
+Microsoft Word 16.114.4 is installed on the development host and would be the
+arbiter to want. It cannot be driven from this process: every document-level Apple
+Event answers `-10004` while a version query succeeds, for Word, TextEdit and
+Finder alike. The two readers above stand in for it and are named as themselves.
+
+Two rules keep the comparison fair, and both are read out of the reader's own
+report rather than out of a list of exceptions — the same rule the block axis
+applies, in a different currency:
+
+- a construct the report declares **dropped at block level** expects no output
+  block, so its subtree is not counted (`text:table-of-content` in
+  `api-for-odfpy.odt`, 37 entries);
+- a construct the report declares **"not converted; its text is kept"** comes out
+  flattened, so its items are counted as body paragraphs rather than list items
+  (`text:list` in `annotation-formatting.odt`).
+
+Pictures are printed but not gated: what a frame carries is not a text block, and
+the block axis above already matches pictures in order with the declared drops
+excused.
+
+**It was proved able to fail before it was trusted.** Suppressing one line of the
+reader — `props["liststyle"] = list_kind` — turns `simplelist.odt`,
+`definitionlists.odt` and `twolevellist.odt` red (`source 'li0', output 'p'`, exit
+1); restoring the file byte-identically (`f300b52c…`, the 0.8.0 asset) turns them
+green again. An axis that cannot go red proves nothing about the documents that
+pass it.
+
+```bash
+python3 -m pip install odfpy python-docx
+python3 tests/corpus/fetch.py
+OFFICECLI_BIN=/path/to/officecli python3 tests/foreign_axis.py
+```
+
+The reader itself still needs nothing but Python: these two packages are needed
+only to read both ends of this check.
+
+It is **not gating CI yet**. It has been measured on macOS arm64 only, and a step
+no run has carried is a claim rather than a check, so the workflow step reports
+and starts gating once one run of it has been read on the runner.
 
 ### What the block axis found in 0.8.0
 

@@ -84,6 +84,22 @@ jobs:
           python3 tests/corpus/fetch.py
           OFFICECLI_BIN="$HOME/.local/bin/officecli" python3 tests/corpus.py
 
+      # The only axis here whose two ends are not the same hand: odfpy reads the
+      # source, python-docx reads the produced document, and neither is this
+      # repository's code, so a reader that loses a block cannot hide it by
+      # losing it on both sides of the comparison. The reader itself needs no
+      # third-party packages; this check does.
+      #
+      # Not gating yet: it has been measured on macOS arm64 only, and a step no
+      # run has carried is a claim rather than a check. It runs and reports here,
+      # and gates once one run of it has been read on this platform.
+      - name: Foreign arbiter
+        continue-on-error: true
+        run: |
+          set -euo pipefail
+          python3 -m pip install --quiet odfpy python-docx
+          OFFICECLI_BIN="$HOME/.local/bin/officecli" python3 tests/foreign_axis.py
+
       # Path 2 of the README's install table, from the published release asset.
       # This is the line no local run could measure: the sandbox this plugin was
       # developed in cannot reach github.com with curl, so the download, the
