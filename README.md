@@ -662,6 +662,17 @@ first conversion. Both runs are the same tree; only the runner differed. The tag
 run's other arm and every macOS run were green, including the foreign corpus at
 40,536 words and 4,536 body blocks with nothing lost.
 
+The 0.9.0 release reproduced that pair a second time, on commit `637f9b7`, and
+added a **third** assembly to the class: the `v0.9.0` tag run was green on both
+arms — the arbiter reading `39 document(s): 38 agree over 4386 text blocks, 1
+REFUSED` on each — while the push-to-`main` run of the same commit failed the
+1.0.158 arm at its first conversion with `Could not load file or assembly
+'System.Private.Xml.Linq, Version=10.0.0.0'`, before the plugin had produced
+anything. Three different assemblies on three different runs is what says the
+variable is the Linux asset's runtime resolution and not the document under test:
+a single measured name would have been equally consistent with one broken code
+path.
+
 ## Three upstream observations made while building this
 
 All are measurements on officecli 1.0.158 (`5e3e2627`), reported here because
