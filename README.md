@@ -13,11 +13,15 @@ answer to "will my document survive the conversion".
 §2.1/§5.1: a one-shot process that streams officecli batch commands as JSONL on
 stdout, which main replays into a fresh native file.
 
-**Version 0.8.0.** Verified against **officecli 1.0.160** (upstream `main` at
+**Version 0.9.0.** Verified against **officecli 1.0.160** (upstream `main` at
 [`c56512c8`](https://github.com/iOfficeAI/OfficeCLI/commit/c56512c8)) and against
 **1.0.158** ([`5e3e2627`](https://github.com/iOfficeAI/OfficeCLI/commit/5e3e2627)),
 with **51 checks**, **8 cells / 118 assertions** and a **39-document foreign
-corpus** green on both, on macOS arm64 with Python 3.13. On that corpus the
+corpus** green on both, on macOS arm64 with Python 3.13. That corpus is now judged
+by a **foreign arbiter** as well: **odfpy** reads the source `.odt`, **python-docx**
+reads the produced `.docx`, and **38 documents agree over 4,386 blocks** with
+neither end of the comparison in this repository's code — the fourth suite, and
+gating in CI on both arms. On that corpus the
 conversion is measured **word by word** — **40,536 source words** compared
 against the produced `.docx`, **0 lost without a word, 0 lost after being
 promised** — and **block by block**: **4,536 body blocks** (paragraph, heading
@@ -46,9 +50,9 @@ discovery paths in protocol §3 — the first match wins:
 | 3 | `<dir of the officecli binary>/plugins/dump-reader/odt/plugin` | ✅ works, listed by `officecli plugins list` |
 | 4 | an executable `officecli-dump-reader-odt` or `officecli-odt` on `PATH` | not tested |
 
-**Measured (0.8.0):** path 2 works end to end — a clean
+**Measured (0.9.0):** path 2 works end to end — a clean
 `HOME=<dir>` with `plugin` at `~/.officecli/plugins/dump-reader/odt/plugin` is
-listed by `officecli plugins list` (name `officecli-odt`, version `0.8.0`) and a
+listed by `officecli plugins list` (name `officecli-odt`, version `0.9.0`) and a
 `.odt` converts through it with no environment variable set, producing a
 sibling `.docx` that validates. That is the path the release notes use.
 
@@ -147,10 +151,10 @@ All of it was measured on **macOS arm64, officecli 1.0.160 and 1.0.158**; the
 same suites also run in CI on Linux against the same released binaries
 ([Tests in CI](#tests-in-ci)).
 
-| construct | 0.8.0 | asserted by | notes |
+| construct | 0.9.0 | asserted by | notes |
 |---|---|---|---|
 | **block structure** — every source block is still a block | ✅ **new in 0.8.0** | `tests/corpus.py` axis 5, 4,536 blocks + 20 pictures | paragraph, heading + level, list item + depth, table + grid and picture matched **in order**; a block may go or change shape only when the report names the construct that held it |
-| **foreign arbiter** — an implementation that is not ours agrees on the block sequence | ✅ **new after 0.8.0** | `tests/foreign_axis.py`, 38 documents / 4,386 blocks | source read with **odfpy**, output read with **python-docx**: with neither end in this repository's code, a block the reader drops cannot disappear from both sides at once. 1 clean refusal (`nasty.odt`, not well-formed XML). Not gating yet — see [the section below](#a-foreign-arbiter-on-the-output) |
+| **foreign arbiter** — an implementation that is not ours agrees on the block sequence | ✅ **new in 0.9.0** | `tests/foreign_axis.py`, 38 documents / 4,386 blocks | source read with **odfpy**, output read with **python-docx**: with neither end in this repository's code, a block the reader drops cannot disappear from both sides at once. 1 clean refusal (`nasty.odt`, not well-formed XML). Gating in CI on both arms — see [the section below](#a-foreign-arbiter-on-the-output) |
 | **word fidelity** — every source word accounted for | ✅ **new in 0.7.0** | `tests/corpus.py` axis 4, 40,536 words | a word may be absent only when the report names the construct that held it; a report that promises the text is held to that promise |
 | paragraphs and text | ✅ | `verify.py`, every cell | each paragraph's text appears exactly once |
 | bold / italic / underline | ✅ | `verify.py` | `fo:font-weight`, `fo:font-style`, `style:text-underline-style` |
@@ -352,9 +356,16 @@ OFFICECLI_BIN=/path/to/officecli python3 tests/foreign_axis.py
 The reader itself still needs nothing but Python: these two packages are needed
 only to read both ends of this check.
 
-It is **not gating CI yet**. It has been measured on macOS arm64 only, and a step
-no run has carried is a claim rather than a check, so the workflow step reports
-and starts gating once one run of it has been read on the runner.
+**The runner has now carried it, so it gates.** On commit `9bfe02c` the step ran
+on both arms and both concluded `success` — the 1.0.158 arm included, whose job is
+`continue-on-error` for reasons that concern officecli's Linux asset and not this
+check. Its own reading on Linux is the same verdict as the one on macOS:
+**39 documents, 38 agree over 4,386 text blocks, 1 refused**. A different platform
+and a different transport (`fetch.py` falls through to plain HTTPS on the runner,
+where this host cannot reach `raw.githubusercontent.com` at all) reaching the same
+4,386 is what makes the number a property of the output rather than of one
+machine. The step is gating now, and the two packages it needs are installed by
+the workflow; the reader itself still needs only Python.
 
 ### What the block axis found in 0.8.0
 

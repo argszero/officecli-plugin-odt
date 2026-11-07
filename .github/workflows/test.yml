@@ -90,11 +90,12 @@ jobs:
       # losing it on both sides of the comparison. The reader itself needs no
       # third-party packages; this check does.
       #
-      # Not gating yet: it has been measured on macOS arm64 only, and a step no
-      # run has carried is a claim rather than a check. It runs and reports here,
-      # and gates once one run of it has been read on this platform.
+      # Gating. It was held non-gating until one run had carried it, because a
+      # step no run has executed is a claim rather than a check. On 9bfe02c it
+      # ran on both arms and both concluded success, reading 39 documents / 38
+      # agreeing over 4,386 blocks / 1 refusal on Linux — the same numbers macOS
+      # gives, over a different transport.
       - name: Foreign arbiter
-        continue-on-error: true
         run: |
           set -euo pipefail
           python3 -m pip install --quiet odfpy python-docx

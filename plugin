@@ -60,7 +60,7 @@ MAX_REPEAT = 64          # guard against a table:number-columns-repeated bomb
 LIST_KINDS = {}
 MANIFEST = {
     "name": "officecli-odt",
-    "version": "0.8.0",
+    "version": "0.9.0",
     "protocol": 1,
     "kinds": ["dump-reader"],
     "extensions": [".odt"],
